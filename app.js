@@ -59,6 +59,7 @@ function deriveData(raw) {
 }
 const phaseOf = y => D.EN.has(y) ? 'El Niño' : D.LN.has(y) ? 'La Niña' : 'Neutral';
 const phaseColor = y => D.EN.has(y) ? 'var(--warm)' : D.LN.has(y) ? 'var(--cool)' : 'var(--neutral)';
+const dayNum = str => { const p = String(str).split(/[- :T]/).map(Number); return Date.UTC(p[0], p[1] - 1, p[2], p[3] || 0, p[4] || 0, p[5] || 0) / DAY; };
 const doyToDate = (doy, y) => { const d = new Date(Date.UTC(y || 2025, 0, 1) + doy * DAY); return d.getUTCDate() + ' ' + MON[d.getUTCMonth()]; };
 const MONTH_OF_DOY = Array.from({ length: 365 }, (_, i) => new Date(Date.UTC(2025, 0, 1) + i * DAY).getUTCMonth() + 1);
 function seasonTotal(y, months, uptoDoy) { // months 1..12; optional cut-off day-of-year
@@ -502,8 +503,8 @@ function renderOutlook() {
     </div>
     <div id="o-body"></div>`;
   const upd = () => drawOutlook();
-  $('#o-rate').oninput = e => { outlook.rate = +e.target.value; upd(); };
-  $('#o-start').oninput = e => { outlook.start = +e.target.value; upd(); };
+  $('#o-rate').oninput = e => { outlook.rate = +e.target.value; outlook.touched = true; upd(); };
+  $('#o-start').oninput = e => { outlook.start = +e.target.value; outlook.touched = true; upd(); };
   el.querySelectorAll('[data-subset]').forEach(b => b.onclick = () => { outlook.subset = b.dataset.subset; el.querySelectorAll('[data-subset]').forEach(x => x.setAttribute('aria-pressed', x === b)); upd(); });
   drawOutlook();
 }
@@ -584,22 +585,258 @@ function drawOutlook() {
       <div class="chart-wrap"><svg class="chart" viewBox="0 0 ${W2} ${H2}" role="img" aria-label="Chance of staying clear of the reserve at each daily use">${g2}</svg></div>
       <p class="small" style="margin-top:6px">${safe ? `About <b>${safe} L/day</b> keeps you clear of the pump reserve in 19 of 20 rain histories over the next 3 years.` : 'No steady daily use keeps you clear in 19 of 20 histories from this starting level.'} Using more in summer and less in winter helps, as does a fuller tank going into summer.</p>
     </div>
-    <p class="note">Replays your tanks through ${subsetLabel}, starting from today's date each year: ${nf.format(CONFIG.capacity)} L capacity, ${nf.format(LPM)} L caught per mm (${CONFIG.roofM2} m² roof at ${Math.round(CONFIG.efficiency * 100)}%), overflow when full. Odds, not a forecast: past rain doesn't promise future rain, and the drying since 1990 shows up in the "Since 1990" view.</p>`;
+    <p class="note">${T.data && !outlook.touched ? `Starting level and daily use come from your latest tank figures. ` : ''}Replays your tanks through ${subsetLabel}, starting from today's date each year: ${nf.format(CONFIG.capacity)} L capacity, ${nf.format(LPM)} L caught per mm (${CONFIG.roofM2} m² roof at ${Math.round(CONFIG.efficiency * 100)}%), overflow when full. Odds, not a forecast: past rain doesn't promise future rain, and the drying since 1990 shows up in the "Since 1990" view.</p>`;
   $('#o-body').querySelectorAll('svg.chart').forEach(bindTips);
 }
 
-// ================================================================= TANKS (v1 next)
+// ================================================================= TANKS (live, via Apps Script)
+const API = CONFIG.trackerUrl;
+const T = { data: null, who: null, at: null, stale: false, busy: false };
+const keyOf = () => { try { return localStorage.getItem('tal-key'); } catch (e) { return null; } };
+
+async function api(action, payload) {
+  const k = keyOf(); if (!k) throw new Error('Not connected');
+  const res = action === 'dashboard'
+    ? await fetch(`${API}?api=dashboard&k=${encodeURIComponent(k)}&t=${Date.now()}`, { credentials: 'omit', redirect: 'follow' })
+    : await fetch(API, { method: 'POST', credentials: 'omit', redirect: 'follow', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(Object.assign({ k, action }, payload || {})) });
+  const j = await res.json();
+  if (!j.ok) throw new Error(j.error || 'Something went wrong');
+  T.data = j.data; T.who = j.who; T.at = Date.now(); T.stale = false;
+  try { localStorage.setItem('tal-dash', JSON.stringify({ data: j.data, who: j.who, at: T.at })); } catch (e) {}
+  syncOutlookFromTanks();
+  return j.data;
+}
+function loadCachedTanks() {
+  try { const c = JSON.parse(localStorage.getItem('tal-dash') || 'null'); if (c) { T.data = c.data; T.who = c.who; T.at = c.at; T.stale = true; syncOutlookFromTanks(); } } catch (e) {}
+}
+function syncOutlookFromTanks() {
+  if (!T.data) return;
+  if (!outlook.touched) { outlook.start = Math.round(T.data.now.tank / 500) * 500; outlook.rate = Math.round(T.data.totals.recentRate / 10) * 10; }
+  CONFIG.capacity = T.data.settings.capacityLitres; CONFIG.reserve = T.data.settings.reserveLitres;
+  if (rendered.outlook) { rendered.outlook = false; if (!$('#view-outlook').hidden) { renderOutlook(); rendered.outlook = true; } }
+}
+
+const fmtWhen = local => { const p = local.split(/[- :]/).map(Number), d = new Date(p[0], p[1] - 1, p[2], p[3], p[4]); return d.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' }) + ', ' + d.toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }).replace(' ', ''); };
+const dayLabel = date => new Date(date + 'T00:00').toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' });
+
+function tankSvg(level, s) {
+  const W = 120, H = 150, x = 14, y = 16, w = 92, h = 124, f = Math.max(0, Math.min(1, level / s.capacityLitres)), r = s.reserveLitres / s.capacityLitres;
+  const wy = y + h * (1 - f);
+  return `<svg viewBox="0 0 ${W} ${H}" class="tank" role="img" aria-label="${nf.format(level)} of ${nf.format(s.capacityLitres)} litres">
+    <defs><clipPath id="tk"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12"/></clipPath>
+      <pattern id="rsv" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="var(--ink-3)" stroke-width="2" opacity=".5"/></pattern></defs>
+    <g clip-path="url(#tk)">
+      <rect x="${x}" y="${y}" width="${w}" height="${h}" fill="var(--grid)"/>
+      <path d="M${x} ${wy} q ${w / 4} -5 ${w / 2} 0 t ${w / 2} 0 V ${y + h} H ${x} Z" fill="var(--water)"/>
+      <rect x="${x}" y="${y + h * (1 - r)}" width="${w}" height="${h * r}" fill="url(#rsv)"/>
+    </g>
+    <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="12" fill="none" stroke="var(--ink-3)" stroke-width="2"/>
+    <rect x="${x + w / 2 - 14}" y="${y - 9}" width="28" height="9" rx="3" fill="var(--ink-3)"/>
+    <text x="${x + w / 2}" y="${Math.min(wy + 22, y + h - 24)}" text-anchor="middle" style="fill:#fff;font-size:17px;font-weight:700">${Math.round(f * 100)}%</text>
+  </svg>`;
+}
+
+function tankOutlook(start, rate) { // one-year replay through all years, for the plain-language lines
+  const hs = histories('all'), sims = hs.map(h => simulate(h.rain, rate, start, 365));
+  const lows = sims.map(s => s.min), lowDays = sims.map(s => s.minDay);
+  const c = {}; lowDays.forEach(d => { const m = new Date(Date.now() + d * DAY).getMonth(); c[m] = (c[m] || 0) + 1; });
+  const rates = []; for (let r = 300; r <= 700; r += 10) rates.push(r);
+  const hs3 = histories('all'), safe = rates.filter(r => reliability(hs3, r, start, 365 * 3) >= 0.95).pop();
+  return { low: median(lows), low10: quantile(lows, 0.1), lowMonth: +Object.entries(c).sort((a, b) => b[1] - a[1])[0][0], hit12: sims.filter(s => s.hit !== null).length, n: sims.length, safe };
+}
+
 function renderTanks() {
-  const key = localStorage.getItem('tal-key');
-  $('#view-tanks').innerHTML = `
-    <div class="view-head"><h1>Tanks</h1><span class="sub">Norton Summit</span></div>
+  const el = $('#view-tanks');
+  if (!keyOf()) {
+    el.innerHTML = `<div class="view-head"><h1>Tanks</h1></div>
+      <div class="card"><div class="q">Not connected yet</div><h3 class="answer">Open Tanks a lot once from your personal link to connect your tanks.</h3>
+      <p class="explain">Your link ends in <b>?k=</b> followed by your key. After that the app remembers you on this phone.</p></div>`;
+    return;
+  }
+  if (!T.data) { loadCachedTanks(); }
+  if (!T.data) {
+    if (T.error) {
+      el.innerHTML = `<div class="view-head"><h1>Tanks</h1></div><div class="card"><div class="q">Couldn't reach your tanks</div>
+        <h3 class="answer">${T.error === 'Failed to fetch' ? 'No connection right now.' : esc(T.error)}</h3>
+        <p class="explain">Your readings are safe in your Google Sheet. Try again when you have signal.</p><button class="btn" id="t-retry">Try again</button></div>`;
+      $('#t-retry').onclick = () => { T.error = null; el.innerHTML = '<div class="skeleton">Fetching your tanks…</div>'; refreshTanks(); };
+      return;
+    }
+    el.innerHTML = '<div class="skeleton">Fetching your tanks…</div>'; if (!T.busy) refreshTanks(); return;
+  }
+  const d = T.data, s = d.settings, t = d.totals, now = d.now;
+  const usable = Math.max(0, now.tank - s.reserveLitres);
+  const o = tankOutlook(now.tank, t.recentRate);
+  const daysNoRain = Math.floor(usable / t.recentRate);
+  const sinceRead = now.daysSinceReading;
+  const verdict = o.low > 40000 ? 'Plenty to get through summer.' : o.low > 20000 ? 'Enough for summer, but it will get tight by autumn.' : 'Tight. Worth cutting back now.';
+  const alerts = [];
+  if (t.highUse) alerts.push(`Use since the last reading was <b>${nf.format(t.latestRate)} L/day</b>, well above your usual ${nf.format(t.prevRecentRate)}. Check for a leak or a tap left on.`);
+  if (sinceRead > 8) alerts.push(`Last meter reading was ${Math.floor(sinceRead)} days ago, so today's figure is an estimate. A fresh reading sharpens everything.`);
+  if (T.stale) alerts.push(`Offline: showing figures from ${new Date(T.at).toLocaleString('en-AU', { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.`);
+
+  // usage chart
+  const iv = d.intervals.slice(-12), W = 340, H = 170, pl = 32, pr = 6, pt = 10, pb = 22;
+  const ymax = Math.max(800, Math.ceil(Math.max(...iv.map(i => i.perDay)) / 200) * 200);
+  const x0 = iv[0].fromDay, x1 = iv[iv.length - 1].toDay, X = v => pl + (v - x0) / (x1 - x0) * (W - pl - pr), Y = v => pt + (1 - v / ymax) * (H - pt - pb);
+  let g = yAxis(Y, niceTicks(ymax, 4), W, pl, pr);
+  iv.forEach((i, n) => {
+    const xa = X(i.fromDay) + 1, xb = X(i.toDay) - 1, y = Y(i.perDay), hot = t.highUse && n === iv.length - 1;
+    g += `<rect x="${xa}" y="${y}" width="${Math.max(2, xb - xa)}" height="${Y(0) - y}" rx="3" fill="${hot ? 'var(--warn)' : 'var(--water)'}" opacity="${o.safe && i.perDay > o.safe ? 1 : .6}" data-tip="<b>${dayLabel(i.from.slice(0, 10))} – ${dayLabel(i.to.slice(0, 10))}</b><br>${nf.format(i.perDay)} L/day · ${nf.format(i.litres)} L${i.note ? '<br>' + esc(i.note) : ''}"/>`;
+  });
+  if (o.safe) g += `<line x1="${pl}" x2="${W - pr}" y1="${Y(o.safe)}" y2="${Y(o.safe)}" stroke="var(--good)" stroke-width="1.5" stroke-dasharray="5 4"/><text x="${W - pr}" y="${Y(o.safe) - 4}" text-anchor="end" style="fill:var(--good);font-weight:600">safe ${o.safe}</text>`;
+  const months = {}; iv.forEach(i => { const m = i.from.slice(0, 7); if (!months[m]) months[m] = X(dayNum(m + '-01')); });
+  Object.entries(months).forEach(([m, x]) => { if (x >= pl) g += `<text x="${x}" y="${H - 6}">${MON[+m.slice(5) - 1]}</text>`; });
+
+  // rain lines
+  const rainSince = d.rain.filter(r => r.date > d.lastReading.local.slice(0, 10));
+  const lastRain = d.rain.filter(r => r.mm >= 1).slice(-1)[0];
+  const fc = (d.forecast && d.forecast.days) || [], fcMm = sum(fc.map(f => f.mm || 0)), fcBig = fc.filter(f => (f.mm || 0) >= 2);
+  const monthKey = now.local.slice(0, 7), monthMm = sum(d.rain.filter(r => r.date.slice(0, 7) === monthKey).map(r => r.mm));
+  const rainHead = fcBig.length ? `${fmtMm(fcMm)} forecast in the next week, worth about ${nf.format(fcMm * d.litresPerMm)} L.` : `Little rain forecast in the next week.`;
+  const rainExplain = `${lastRain ? `The last useful rain was ${dayLabel(lastRain.date)} (${fmtMm(lastRain.mm)}, about ${nf.format(lastRain.litres)} L into the tanks). ` : ''}${MON[+monthKey.slice(5) - 1]} so far: ${fmtMm(monthMm)}. Since tracking began the roof has caught <b>${nf.format(t.captured)} L</b>. Every 1 mm on the roof is about ${nf.format(d.litresPerMm)} L.`;
+
+  el.innerHTML = `
+    <div class="view-head"><h1>Tanks</h1><span class="sub">Hi ${esc(T.who || '')}</span></div>
+    ${alerts.map(a => `<div class="alert">${a}</div>`).join('')}
     <div class="card">
-      <div class="big num">${nf.format(Math.round((CONFIG.startTank - CONFIG.reserve) / 100) * 100)} <small>L usable</small></div>
-      <p class="lead">At the last reading (${new Date(CONFIG.startTankDate).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })}).</p>
-      <p class="small muted">The full tank screens (log a reading, usage, planner) are being rebuilt for this app next. Until then, log readings in the current tracker.</p>
+      <div class="q">How much water have we got?</div>
+      <div class="hero-row">${tankSvg(now.tank, s)}
+        <div><div class="big num">${nf.format(Math.round(usable / 100) * 100)}</div><div class="muted small">litres usable now</div>
+        <p class="small" style="margin-top:8px">${nf.format(now.tank)} L in the tanks, less the ${(Math.round(s.reserveLitres / 1000) + 'k')} the pump can't reach.</p></div>
+      </div>
+      <h3 class="answer" style="margin-top:12px">${verdict}</h3>
+      <p class="explain">With no rain at all you'd have about <b>${daysNoRain} days</b> at your recent ${nf.format(t.recentRate)} L a day. In a typical year the tanks bottom out around <b>${MON[o.lowMonth]}</b> at about ${nf.format(Math.round(o.low / 1000) * 1000)} L, and in the worst 1 in 10 years about ${nf.format(Math.round(o.low10 / 1000) * 1000)} L.</p>
+      <p class="tiny muted">Last reading ${fmtWhen(d.lastReading.local)} · ${nf.format(d.lastReading.meter)} L on the meter${sinceRead > 0.5 ? ' · today is estimated' : ''}</p>
     </div>
-    ${key ? `<a class="btn" href="${CONFIG.trackerUrl}?k=${encodeURIComponent(key)}" target="_blank" rel="noopener">Open tank tracker</a>`
-          : `<p class="note">Open this app once from your personal tracker link to connect your tanks.</p>`}`;
+    <button class="btn big-btn" id="t-log">+ Log a meter reading</button>
+    ${card({
+      q: 'Are we using too much?',
+      headline: o.safe ? (t.recentRate > o.safe + 15 ? `A little. You're using ${nf.format(t.recentRate)} L a day; the rain reliably supports about ${o.safe}.` : `No. ${nf.format(t.recentRate)} L a day is within what the roof can reliably supply (about ${o.safe}).`) : `Lately ${nf.format(t.recentRate)} L a day.`,
+      explain: `"Reliably" means staying clear of the pump reserve in 19 of 20 rain histories over three years. Each bar is the daily average between two readings; ${t.latestRate > t.prevRecentRate * 1.1 ? 'the latest period was higher than usual.' : 'recent periods are steady.'} Since September: ${nf.format(t.overallRate)} L a day.`,
+      chart: `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Litres per day between readings">${g}</svg>`,
+      numbers: `${table(['Reading', 'Meter L', 'L/day', ''], d.readings.slice().reverse().map((r, i, arr) => {
+        const ivv = d.intervals.find(x => x.to === r.local);
+        return [`${fmtWhen(r.local)}<br><span class="tiny muted">${esc(r.by || '')}${r.note ? ' · ' + esc(r.note) : ''}</span>`, nf.format(r.meter), ivv ? nf.format(ivv.perDay) : '–', i === arr.length - 1 ? '' : `<button class="x" data-del-reading="${r.local}" aria-label="Delete reading">✕</button>`];
+      }))}`,
+      numbersLabel: `All ${d.readings.length} readings`
+    })}
+    ${card({
+      q: 'Is rain topping them up?',
+      headline: rainHead,
+      explain: rainExplain + (d.rainStatus ? ` <span class="tiny">Rain is logged automatically each morning from ${esc(d.rainStatus.source || 'SILO')}.</span>` : ''),
+      chart: rainStrip(d),
+      numbers: table(['Day', 'mm', 'Litres', 'Source'], d.rain.slice().reverse().slice(0, 40).map(r => [dayLabel(r.date), r.mm, nf.format(r.litres), `<span class="tiny muted">${esc(shortSrc(r.source))}</span><button class="x" data-del-rain="${r.date}" aria-label="Delete rain entry">✕</button>`])),
+      numbersLabel: 'Rain log'
+    })}
+    <div class="card">
+      <div class="q">Keep the numbers honest</div>
+      <p class="explain">The meter measures what you use, not what's in the tank, so the level is an estimate. If your own gauge disagrees with the rain, or you dip the tanks, record it here and the model corrects itself.</p>
+      <div class="row2"><button class="ghost" id="t-rain">Enter rain by hand</button><button class="ghost" id="t-check">Record tank level</button></div>
+      ${d.checks.length ? `<p class="tiny muted" style="margin-top:8px">Last check: ${nf.format(d.checks[d.checks.length - 1].litres)} L.</p>` : ''}
+    </div>
+    <p class="note">Your readings live in your private Google Sheet. <a href="https://docs.google.com/spreadsheets/d/1-jxUCdUG4zsni5m9vYbpUEs54PbtBwCKq36Yb_zdKgE/edit" target="_blank" rel="noopener">Open the sheet</a></p>`;
+  el.querySelectorAll('svg.chart').forEach(bindTips);
+  $('#t-log').onclick = () => openForm('reading');
+  $('#t-rain').onclick = () => openForm('rain');
+  $('#t-check').onclick = () => openForm('check');
+  el.querySelectorAll('[data-del-reading]').forEach(b => b.onclick = () => confirmDelete('deleteReading', { at: b.dataset.delReading }, `the reading from ${fmtWhen(b.dataset.delReading)}`));
+  el.querySelectorAll('[data-del-rain]').forEach(b => b.onclick = () => confirmDelete('deleteRain', { date: b.dataset.delRain }, `the rain entry for ${dayLabel(b.dataset.delRain)}`));
+}
+const shortSrc = s => /SILO/.test(s) ? 'SILO' : /Open-Meteo/.test(s) ? 'estimate' : /Willy|BOM/.test(s) ? 'BOM' : s;
+const fmtMm = v => (Math.round(v * 10) / 10) + ' mm';
+
+function rainStrip(d) {
+  const today = Math.floor(d.now.day), start = today - 20, end = today + 7, obs = {}, fc = {};
+  d.rain.forEach(r => obs[Math.floor(dayNum(r.date))] = r);
+  ((d.forecast && d.forecast.days) || []).forEach(f => fc[Math.floor(dayNum(f.date))] = f);
+  const W = 340, H = 120, pl = 26, pr = 4, pt = 8, pb = 20, n = end - start + 1, bw = (W - pl - pr) / n;
+  let ymax = 5; for (let i = start; i <= end; i++) ymax = Math.max(ymax, (obs[i] && obs[i].mm) || (i >= today && fc[i] && fc[i].mm) || 0);
+  ymax = Math.ceil(ymax / 5) * 5;
+  const Y = v => pt + (1 - v / ymax) * (H - pt - pb);
+  let g = yAxis(Y, [0, ymax], W, pl, pr);
+  g += `<defs><pattern id="hatch2" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--water-soft)"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--water)" stroke-width="1.5"/></pattern></defs>`;
+  for (let i = start; i <= end; i++) {
+    const isFc = i >= today && !obs[i], v = isFc ? ((fc[i] && fc[i].mm) || 0) : ((obs[i] && obs[i].mm) || 0), x = pl + (i - start) * bw + 1, w = bw - 2;
+    if (v > 0) g += `<rect x="${x}" y="${Y(v)}" width="${w}" height="${Y(0) - Y(v)}" rx="2" fill="${isFc ? 'url(#hatch2)' : 'var(--water)'}"/>`;
+    const lab = new Date(Date.UTC(1970, 0, 1) + i * DAY);
+    g += `<rect x="${x - 1}" y="0" width="${bw}" height="${H}" fill="transparent" data-tip="<b>${lab.getUTCDate()} ${MON[lab.getUTCMonth()]}</b><br>${isFc ? `Forecast ${fmtMm(v)}${fc[i] && fc[i].chance != null ? ` · ${fc[i].chance}% chance` : ''}` : v ? `${fmtMm(v)} · ${nf.format(v * d.litresPerMm)} L caught` : 'No rain'}"/>`;
+    if ((i - start) % 7 === 0) g += `<text x="${x + w / 2}" y="${H - 5}" text-anchor="middle">${lab.getUTCDate()} ${MON[lab.getUTCMonth()]}</text>`;
+  }
+  const tx = pl + (today - start) * bw;
+  g += `<line x1="${tx}" x2="${tx}" y1="${pt}" y2="${H - pb}" stroke="var(--ink-3)" stroke-dasharray="2 3"/><text x="${tx + 3}" y="${pt + 8}">forecast →</text>`;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Rain over the last three weeks and the week ahead">${g}</svg>`;
+}
+
+async function refreshTanks(quiet) {
+  if (T.busy) return; T.busy = true;
+  try { await api('dashboard'); T.error = null; } catch (e) { T.error = e.message; if (!quiet && T.data) toast(e.message === 'Failed to fetch' ? 'Offline: showing saved figures.' : e.message); T.stale = !!T.data; }
+  T.busy = false;
+  if (!$('#view-tanks').hidden || !rendered.tanks) renderTanks();
+}
+
+// ---------------- forms (bottom sheets)
+function openForm(kind) {
+  const d = T.data, nowLocal = (() => { const n = new Date(), p = v => String(v).padStart(2, '0'); return `${n.getFullYear()}-${p(n.getMonth() + 1)}-${p(n.getDate())}T${p(n.getHours())}:${p(n.getMinutes())}`; })();
+  const forms = {
+    reading: `<h3>Log a meter reading</h3>
+      <label class="fl">Meter reading <span class="muted">(litres, or m³ like 36.48)</span></label>
+      <input id="f-meter" class="inp huge" inputmode="decimal" autocomplete="off" placeholder="${nf.format(d.lastReading.meter)}">
+      <div class="hint" id="f-hint">Last: ${nf.format(d.lastReading.meter)} L, ${fmtWhen(d.lastReading.local)}.</div>
+      <label class="fl">Note <span class="muted">(optional)</span></label><input id="f-note" class="inp" placeholder="e.g. watered the new beds">
+      <label class="fl">Read at</label><input id="f-when" class="inp" type="datetime-local" value="${nowLocal}">`,
+    rain: `<h3>Enter rain by hand</h3><p class="small muted">For when your own gauge disagrees. It replaces the automatic figure for that day.</p>
+      <div class="row2"><div><label class="fl">Date</label><input id="f-date" class="inp" type="date" value="${nowLocal.slice(0, 10)}"></div>
+      <div><label class="fl">Rain (mm)</label><input id="f-mm" class="inp" inputmode="decimal"></div></div>
+      <label class="fl">Note <span class="muted">(optional)</span></label><input id="f-note" class="inp">`,
+    check: `<h3>Record tank level</h3><p class="small muted">If you measure the main tanks (dipstick or gauge), enter the total. The estimate resets to it.</p>
+      <label class="fl">Water in main tanks (litres)</label><input id="f-litres" class="inp huge" inputmode="numeric">
+      <label class="fl">How you measured <span class="muted">(optional)</span></label><input id="f-note" class="inp">`
+  };
+  const wrap = document.createElement('div');
+  wrap.className = 'sheet-wrap';
+  wrap.innerHTML = `<div class="scrim"></div><div class="sheet">${forms[kind]}<div class="row2" style="margin-top:14px"><button class="ghost" data-close>Cancel</button><button class="btn" id="f-save">Save</button></div></div>`;
+  document.body.appendChild(wrap);
+  requestAnimationFrame(() => wrap.classList.add('open'));
+  const close = () => { wrap.classList.remove('open'); setTimeout(() => wrap.remove(), 250); };
+  wrap.querySelector('.scrim').onclick = close; wrap.querySelector('[data-close]').onclick = close;
+  const save = wrap.querySelector('#f-save');
+  if (kind === 'reading') {
+    const inp = wrap.querySelector('#f-meter'), hint = wrap.querySelector('#f-hint');
+    setTimeout(() => inp.focus(), 280);
+    save.disabled = true;
+    inp.oninput = () => {
+      const l = parseMeter(inp.value); hint.className = 'hint';
+      if (!inp.value) { hint.textContent = `Last: ${nf.format(d.lastReading.meter)} L.`; save.disabled = true; return; }
+      if (l === null) { hint.textContent = 'Numbers only, please.'; hint.className = 'hint bad'; save.disabled = true; return; }
+      const used = l - d.lastReading.meter, days = (Date.now() - new Date(d.lastReading.local.replace(' ', 'T')).getTime()) / DAY;
+      if (used < 0) { hint.textContent = `That's lower than the last reading (${nf.format(d.lastReading.meter)} L). Check the dial.`; hint.className = 'hint bad'; save.disabled = true; return; }
+      const per = days > 0.5 ? used / days : null;
+      hint.textContent = `= ${nf.format(l)} L · ${nf.format(used)} L since last time${per ? ` (${nf.format(per)} L/day)` : ''}`;
+      if (per && per > Math.max(1500, d.totals.recentRate * 3)) { hint.textContent += '. That looks very high: check the dial?'; hint.className = 'hint bad'; }
+      save.disabled = false;
+    };
+  }
+  save.onclick = async () => {
+    save.disabled = true; save.textContent = 'Saving…';
+    try {
+      if (kind === 'reading') await api('addReading', { litres: parseMeter(wrap.querySelector('#f-meter').value), note: wrap.querySelector('#f-note').value, when: wrap.querySelector('#f-when').value });
+      if (kind === 'rain') await api('setRain', { date: wrap.querySelector('#f-date').value, mm: +wrap.querySelector('#f-mm').value, note: wrap.querySelector('#f-note').value });
+      if (kind === 'check') await api('addTankCheck', { litres: +String(wrap.querySelector('#f-litres').value).replace(/[,\s]/g, ''), note: wrap.querySelector('#f-note').value });
+      close(); renderTanks();
+      if (kind === 'reading') { const iv = T.data.intervals[T.data.intervals.length - 1]; toast(`Saved. ${nf.format(iv.litres)} L since last time, ${nf.format(iv.perDay)} L a day.`); }
+      else toast('Saved.');
+    } catch (e) { toast(e.message === 'Failed to fetch' ? 'No connection. Try again when you have signal.' : e.message); save.disabled = false; save.textContent = 'Save'; }
+  };
+}
+function parseMeter(raw) { const v = Number(String(raw).replace(/[,\s]/g, '')); if (!(v > 0)) return null; return v < 5000 ? Math.round(v * 1000) : Math.round(v); }
+async function confirmDelete(action, payload, what) {
+  if (!window.confirm(`Delete ${what}?`)) return;
+  try { await api(action, payload); renderTanks(); toast('Deleted.'); } catch (e) { toast(e.message); }
+}
+function toast(msg) {
+  let t = $('#toast'); if (!t) { t = document.createElement('div'); t.id = 'toast'; t.className = 'toast'; document.body.appendChild(t); }
+  t.textContent = msg; t.style.opacity = 1; clearTimeout(t._h); t._h = setTimeout(() => t.style.opacity = 0, 2800);
 }
 
 // ================================================================= RAIN view shell
@@ -622,6 +859,7 @@ function show(tab) {
   document.querySelectorAll('.view').forEach(v => v.hidden = v.id !== 'view-' + tab);
   if (!rendered[tab] && D) { ({ tanks: renderTanks, rain: renderRain, outlook: renderOutlook })[tab](); rendered[tab] = true; }
   hideTip(); scrollTo(0, 0);
+  if (tab === 'tanks' && keyOf() && (!T.at || Date.now() - T.at > 60000)) refreshTanks(true);
   try { localStorage.setItem('tal-tab', tab); } catch (e) {}
   history.replaceState(null, '', '#' + tab);
 }
@@ -630,10 +868,12 @@ document.querySelectorAll('.tabbar [data-tab]').forEach(b => b.onclick = () => s
 (async function boot() {
   const params = new URLSearchParams(location.search);
   if (params.get('k')) { try { localStorage.setItem('tal-key', params.get('k')); } catch (e) {} history.replaceState(null, '', location.pathname + location.hash); }
-  const initial = (location.hash || '').slice(1) || (() => { try { return localStorage.getItem('tal-tab'); } catch (e) { return null; } })() || 'rain';
+  const initial = (location.hash || '').slice(1) || (() => { try { return localStorage.getItem('tal-tab'); } catch (e) { return null; } })() || (keyOf() ? 'tanks' : 'rain');
   document.querySelectorAll('.view').forEach(v => v.innerHTML = '<div class="skeleton">Loading 137 years of rain…</div>');
   const raw = await fetch('data/rain.json', { cache: 'no-cache' }).then(r => r.json());
   D = deriveData(raw);
+  loadCachedTanks();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && keyOf()) refreshTanks(true); });
   show(['tanks', 'rain', 'outlook'].includes(initial) ? initial : 'rain');
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();

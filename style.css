@@ -123,3 +123,24 @@ details[open] summary::after { transform: rotate(90deg); }
 .rec-grid h4 { margin: 8px 0 0; font-size: 13px; color: var(--ink-2); }
 .rec-grid .tbl { font-size: 12.5px; } .rec-grid .tbl thead { display: none; }
 .seg button { font-size: 13.5px; padding: 8px 4px; }
+
+/* tanks */
+.alert { background: rgba(244,114,48,.13); border-radius: 14px; padding: 11px 14px; margin-bottom: 10px; font-size: 14.5px; }
+.hero-row { display: flex; gap: 14px; align-items: center; margin-top: 6px; }
+.hero-row .tank { width: 112px; flex: none; }
+.big-btn { margin: 0 0 12px; padding: 17px; font-size: 17px; background: var(--water); color: #fff; box-shadow: 0 4px 14px rgba(37,125,224,.3); }
+.ghost { flex: 1; background: transparent; border: 1px solid var(--line); color: var(--ink); border-radius: 12px; padding: 12px; font: inherit; font-size: 14.5px; }
+.row2 { display: flex; gap: 10px; } .row2 > * { flex: 1; }
+.x { border: 0; background: none; color: var(--ink-3); font-size: 15px; padding: 2px 4px; margin-left: 4px; }
+.tbl td .x { vertical-align: middle; }
+.sheet-wrap .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.35); opacity: 0; transition: opacity .2s; z-index: 40; }
+.sheet-wrap .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 41; background: var(--card); border-radius: 22px 22px 0 0; max-width: 600px; margin: 0 auto;
+  padding: 22px 18px calc(18px + env(safe-area-inset-bottom)); transform: translateY(105%); transition: transform .25s ease; }
+.sheet-wrap.open .scrim { opacity: 1; } .sheet-wrap.open .sheet { transform: none; }
+.sheet h3 { margin: 0 0 12px; font-size: 20px; }
+.fl { display: block; font-size: 13px; color: var(--ink-2); margin: 12px 0 6px; }
+.inp { width: 100%; font: inherit; font-size: 17px; padding: 13px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+.inp.huge { font-size: 30px; font-weight: 650; }
+.hint { font-size: 13.5px; color: var(--ink-2); min-height: 20px; margin-top: 6px; } .hint.bad { color: var(--warn); }
+.btn:disabled { opacity: .45; }
+.toast { position: fixed; left: 50%; bottom: calc(90px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--ink); color: var(--card); padding: 11px 16px; border-radius: 12px; font-size: 14.5px; opacity: 0; transition: opacity .2s; z-index: 50; max-width: 90%; text-align: center; }
