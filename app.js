@@ -682,7 +682,9 @@ function renderGenie() {
 // ================================================================= TANKS (live, via Apps Script)
 const API = CONFIG.trackerUrl;
 const T = { data: null, who: null, at: null, stale: false, busy: false };
-const keyOf = () => { try { return localStorage.getItem('tal-key'); } catch (e) { return null; } };
+const keyOf = () => { try { return localStorage.getItem('tal-key') || new URLSearchParams(location.search).get('k'); } catch (e) { return new URLSearchParams(location.search).get('k'); } };
+// Keep the key in the address too: a home-screen app opens from the address it was added at, and has its own storage.
+function setKey(k) { try { localStorage.setItem('tal-key', k); } catch (e) {} history.replaceState(null, '', location.pathname + '?k=' + encodeURIComponent(k) + location.hash); }
 
 async function api(action, payload) {
   const k = keyOf(); if (!k) throw new Error('Not connected');
@@ -733,8 +735,16 @@ function renderTanks() {
   const el = $('#view-tanks');
   if (!keyOf()) {
     el.innerHTML = `<div class="view-head"><h1>Tanks</h1></div>
-      <div class="card"><div class="q">Not connected yet</div><h3 class="answer">Open Tanks a lot once from your personal link to connect your tanks.</h3>
-      <p class="explain">Your link ends in <b>?k=</b> followed by your key. After that the app remembers you on this phone.</p></div>`;
+      <div class="card"><div class="q">Not connected yet</div><h3 class="answer">Paste your personal link to connect your tanks.</h3>
+      <p class="explain">It's the link ending in <b>?k=</b> and your key. You only need to do this once on this phone.</p>
+      <input class="inp" id="k-in" placeholder="Paste link or key" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="btn" id="k-go" style="margin-top:10px">Connect</button><p class="hint" id="k-err"></p></div>`;
+    $('#k-go').onclick = () => {
+      const v = ($('#k-in').value || '').trim();
+      const m = v.match(/[?&]k=([A-Za-z0-9_-]+)/) || v.match(/^([A-Za-z0-9_-]{8,})$/);
+      if (!m) { $('#k-err').textContent = "That doesn't look like your link. It should end in ?k= and your key."; return; }
+      setKey(m[1]); renderTanks(); refreshTanks(true);
+    };
     return;
   }
   if (!T.data) { loadCachedTanks(); }
@@ -948,13 +958,13 @@ function show(tab) {
   hideTip(); scrollTo(0, 0);
   if (tab === 'tanks' && keyOf() && (!T.at || Date.now() - T.at > 60000)) refreshTanks(true);
   try { localStorage.setItem('tal-tab', tab); } catch (e) {}
-  history.replaceState(null, '', '#' + tab);
+  history.replaceState(null, '', location.pathname + location.search + '#' + tab);
 }
 document.querySelectorAll('.tabbar [data-tab]').forEach(b => b.onclick = () => show(b.dataset.tab));
 
 (async function boot() {
   const params = new URLSearchParams(location.search);
-  if (params.get('k')) { try { localStorage.setItem('tal-key', params.get('k')); } catch (e) {} history.replaceState(null, '', location.pathname + location.hash); }
+  if (params.get('k')) setKey(params.get('k')); else if (keyOf()) setKey(keyOf());
   const initial = (location.hash || '').slice(1) || (() => { try { return localStorage.getItem('tal-tab'); } catch (e) { return null; } })() || (keyOf() ? 'tanks' : 'rain');
   document.querySelectorAll('.view').forEach(v => v.innerHTML = '<div class="skeleton">Loading 137 years of rain…</div>');
   const raw = await fetch('data/rain.json', { cache: 'no-cache' }).then(r => r.json());
