@@ -144,3 +144,6 @@ details[open] summary::after { transform: rotate(90deg); }
 .hint { font-size: 13.5px; color: var(--ink-2); min-height: 20px; margin-top: 6px; } .hint.bad { color: var(--warn); }
 .btn:disabled { opacity: .45; }
 .toast { position: fixed; left: 50%; bottom: calc(90px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--ink); color: var(--card); padding: 11px 16px; border-radius: 12px; font-size: 14.5px; opacity: 0; transition: opacity .2s; z-index: 50; max-width: 90%; text-align: center; }
+
+.card.genie { background: linear-gradient(160deg, var(--card), var(--water-soft)); }
+.pills button { white-space: nowrap; }

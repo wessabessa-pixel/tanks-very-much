@@ -59,6 +59,7 @@ function deriveData(raw) {
 }
 const phaseOf = y => D.EN.has(y) ? 'El Niño' : D.LN.has(y) ? 'La Niña' : 'Neutral';
 const phaseColor = y => D.EN.has(y) ? 'var(--warm)' : D.LN.has(y) ? 'var(--cool)' : 'var(--neutral)';
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const dayNum = str => { const p = String(str).split(/[- :T]/).map(Number); return Date.UTC(p[0], p[1] - 1, p[2], p[3] || 0, p[4] || 0, p[5] || 0) / DAY; };
 const doyToDate = (doy, y) => { const d = new Date(Date.UTC(y || 2025, 0, 1) + doy * DAY); return d.getUTCDate() + ' ' + MON[d.getUTCMonth()]; };
 const MONTH_OF_DOY = Array.from({ length: 365 }, (_, i) => new Date(Date.UTC(2025, 0, 1) + i * DAY).getUTCMonth() + 1);
@@ -223,6 +224,19 @@ function renderHistory(el) {
   });
 
   // --- 2. monthly shift
+  // --- 3. rain days
+  const rd = y => D.raw.raindays[y], hv = y => D.raw.heavydays[y];
+  const W3 = 340, H3 = 150, pl3 = 30, pr3 = 6, pt3 = 8, pb3 = 22;
+  const rdVals = full.map(rd), ymax3 = Math.ceil(Math.max(...rdVals) / 20) * 20, ymin3 = Math.floor(Math.min(...rdVals) / 20) * 20;
+  const X3 = i => pl3 + i / (full.length - 1) * (W3 - pl3 - pr3), Y3 = v => pt3 + (1 - (v - ymin3) / (ymax3 - ymin3)) * (H3 - pt3 - pb3);
+  let g3 = '';
+  for (let v = ymin3; v <= ymax3; v += 20) g3 += `<line x1="${pl3}" x2="${W3 - pr3}" y1="${Y3(v)}" y2="${Y3(v)}" stroke="var(--grid)"/><text x="${pl3 - 5}" y="${Y3(v) + 3.5}" text-anchor="end">${v}</text>`;
+  full.forEach((y, i) => g3 += `<circle cx="${X3(i)}" cy="${Y3(rd(y))}" r="2.2" fill="var(--water)" opacity=".45" data-tip="<b>${y}</b>: ${rd(y)} days with 1 mm or more<br>${hv(y)} days with 20 mm or more"/>`);
+  const roll3 = full.map((y, i) => i < 14 ? null : [X3(i), Y3(mean(full.slice(i - 14, i + 1).map(rd)))]).filter(Boolean);
+  g3 += `<path d="${path(roll3)}" fill="none" stroke="var(--ink)" stroke-width="2" stroke-linejoin="round"/>`;
+  [1900, 1950, 2000].forEach(y => g3 += `<text x="${X3(full.indexOf(y))}" y="${H3 - 6}" text-anchor="middle">${y}</text>`);
+  const rdE = mean(early.map(rd)), rdR = mean(recent.map(rd)), hvE = mean(early.map(hv)), hvR = mean(recent.map(hv));
+  const perDay = ys => sum(ys.map(y => D.annual[y])) / sum(ys.map(rd));
   const mE = Array.from({ length: 12 }, (_, m) => mean(early.map(y => D.monthly[y][m])));
   const mR = Array.from({ length: 12 }, (_, m) => mean(recent.map(y => D.monthly[y][m])));
   const W2 = 340, H2 = 180, pl2 = 30, pr2 = 4, pt2 = 18, pb2 = 22, ymax2 = Math.ceil(Math.max(...mE, ...mR) / 20) * 20;
@@ -241,40 +255,20 @@ function renderHistory(el) {
   const q2 = card({
     q: 'Which part of the year has changed?',
     headline: 'The wet season starts later and finishes earlier. Winter itself is as wet as ever.',
-    explain: `${drops.slice(0, 3).map(o => `${MON[o.m]} is down ${Math.abs(Math.round(o.c))}%`).join(', ')} since 1990, while June to September is ${Math.abs(Math.round((wR / wE - 1) * 100)) <= 3 ? 'unchanged' : pctTxt((wR / wE - 1) * 100)}. For tanks, that means a longer wait in autumn before they start refilling, and an earlier start to the summer drawdown.`,
+    explain: `${drops.slice(0, 3).map(o => `${MON[o.m]} is down ${Math.abs(Math.round(o.c))}%`).join(', ')} since 1990, while June to September is ${Math.abs(Math.round((wR / wE - 1) * 100)) <= 3 ? 'unchanged' : pctTxt((wR / wE - 1) * 100)}. For tanks, that means a longer wait in autumn before they start refilling. We also get about ${Math.round(rdE - rdR)} fewer rainy days a year, but the big soaking falls that fill tanks are holding up.`,
     chart: `<svg class="chart" viewBox="0 0 ${W2} ${H2}" role="img" aria-label="Average rain by month before and since 1990">${g2}</svg>`,
     legend: `<span><i style="background:var(--neutral);opacity:.6"></i>1889–1989</span><span><i style="background:var(--water)"></i>1990–${D.lastFull}</span>`,
-    numbers: table(['Month', '1889–1989', `1990–${String(D.lastFull).slice(2)}`, 'Change'], mE.map((e, m) => ({ hl: Math.abs(mR[m] / e - 1) >= 0.15, cells: [MON[m], nf.format(e), nf.format(mR[m]), pctTxt((mR[m] / e - 1) * 100)] })), { note: 'Average monthly rain in mm. Highlighted rows changed by 15% or more.' }),
+    numbers: table(['Month', '1889–1989', `1990–${String(D.lastFull).slice(2)}`, 'Change'], mE.map((e, m) => ({ hl: Math.abs(mR[m] / e - 1) >= 0.15, cells: [MON[m], nf.format(e), nf.format(mR[m]), pctTxt((mR[m] / e - 1) * 100)] })).concat([
+      { cells: ['<b>Rainy days a year</b>', Math.round(rdE), Math.round(rdR), pctTxt((rdR / rdE - 1) * 100)] },
+      { cells: ['<b>Falls of 20 mm+ a year</b>', hvE.toFixed(1), hvR.toFixed(1), pctTxt((hvR / hvE - 1) * 100)] }]), { note: 'Average monthly rain in mm. Highlighted rows changed by 15% or more.' }),
     numbersLabel: 'See each month'
   });
 
-  // --- 3. rain days
-  const rd = y => D.raw.raindays[y], hv = y => D.raw.heavydays[y];
-  const W3 = 340, H3 = 150, pl3 = 30, pr3 = 6, pt3 = 8, pb3 = 22;
-  const rdVals = full.map(rd), ymax3 = Math.ceil(Math.max(...rdVals) / 20) * 20, ymin3 = Math.floor(Math.min(...rdVals) / 20) * 20;
-  const X3 = i => pl3 + i / (full.length - 1) * (W3 - pl3 - pr3), Y3 = v => pt3 + (1 - (v - ymin3) / (ymax3 - ymin3)) * (H3 - pt3 - pb3);
-  let g3 = '';
-  for (let v = ymin3; v <= ymax3; v += 20) g3 += `<line x1="${pl3}" x2="${W3 - pr3}" y1="${Y3(v)}" y2="${Y3(v)}" stroke="var(--grid)"/><text x="${pl3 - 5}" y="${Y3(v) + 3.5}" text-anchor="end">${v}</text>`;
-  full.forEach((y, i) => g3 += `<circle cx="${X3(i)}" cy="${Y3(rd(y))}" r="2.2" fill="var(--water)" opacity=".45" data-tip="<b>${y}</b>: ${rd(y)} days with 1 mm or more<br>${hv(y)} days with 20 mm or more"/>`);
-  const roll3 = full.map((y, i) => i < 14 ? null : [X3(i), Y3(mean(full.slice(i - 14, i + 1).map(rd)))]).filter(Boolean);
-  g3 += `<path d="${path(roll3)}" fill="none" stroke="var(--ink)" stroke-width="2" stroke-linejoin="round"/>`;
-  [1900, 1950, 2000].forEach(y => g3 += `<text x="${X3(full.indexOf(y))}" y="${H3 - 6}" text-anchor="middle">${y}</text>`);
-  const rdE = mean(early.map(rd)), rdR = mean(recent.map(rd)), hvE = mean(early.map(hv)), hvR = mean(recent.map(hv));
-  const perDay = ys => sum(ys.map(y => D.annual[y])) / sum(ys.map(rd));
-  const q3 = card({
-    q: 'Is the rain falling differently?',
-    headline: 'Fewer drizzly days, but the big soaking falls are holding up.',
-    explain: `Norton Summit now gets about <b>${Math.round(rdR)} rainy days a year</b>, down from ${Math.round(rdE)}. Days with 20 mm or more, the ones that really fill tanks, are unchanged at about ${hvR.toFixed(1)} a year. Most of the loss is light rain that barely reaches the gutters anyway.`,
-    chart: `<svg class="chart" viewBox="0 0 ${W3} ${H3}" role="img" aria-label="Rainy days per year since 1889">${g3}</svg>`,
-    legend: `<span><i style="background:var(--water);opacity:.5;border-radius:50%"></i>Rainy days that year</span><span><i class="line" style="background:var(--ink)"></i>15-year average</span>`,
-    numbers: table(['Per year', '1889–1989', `1990–${String(D.lastFull).slice(2)}`], [
-      ['Rainy days (1 mm+)', Math.round(rdE), Math.round(rdR)],
-      ['Big falls (20 mm+)', hvE.toFixed(1), hvR.toFixed(1)],
-      ['Average fall on a rainy day', perDay(early).toFixed(1) + ' mm', perDay(recent).toFixed(1) + ' mm']
-    ])
-  });
-
   // --- 4. dry runs (decade grid)
+  // --- 5. memory
+  const q20 = quantile(ann, 0.2), q80 = quantile(ann, 0.8);
+  const after = (cond, test) => { const ys = full.filter(y => cond(D.annual[y]) && D.annual[y + 1] != null); return { n: ys.length, p: Math.round(ys.filter(y => test(D.annual[y + 1])).length / ys.length * 100) }; };
+  const aDry = after(v => v <= q20, v => v < med), aWet = after(v => v >= q80, v => v > med), aDryDry = after(v => v <= q20, v => v <= q20);
   const cell = 24, gap = 3, cols = 10, rows = Math.ceil((D.lastFull - 1880 + 1) / 10);
   const W4 = 48 + cols * (cell + gap), H4 = rows * (cell + gap) + 4;
   let g4 = '';
@@ -297,34 +291,19 @@ function renderHistory(el) {
   const q4 = card({
     q: 'How bad do dry spells get?',
     headline: `The longest dry run on record is a recent one: ${runs[0][0]}–${runs[0][runs[0].length - 1]}.`,
-    explain: `Each square is a year: orange was below typical, blue above, and stronger colour means further from typical. Dry years tend to come in clumps of 3 or 4, and ${runs[0].length} below-typical years in a row is the record. ${s2.findIndex(o => o.y1 === D.lastFull) >= 0 && s2.findIndex(o => o.y1 === D.lastFull) < 5 ? `${D.lastFull - 1}–${D.lastFull} was the ${ordinal(s2.findIndex(o => o.y1 === D.lastFull) + 1)} driest pair of years since 1889.` : ''}`,
+    explain: `Each square is a year: orange was below typical, blue above, and stronger colour means further from typical. Dry years tend to come in clumps of 3 or 4, and ${runs[0].length} in a row is the record. That's bad luck stacking up rather than a pattern locking in: after a very dry year, the next was below typical ${aDry.p}% of the time, close to a coin toss. ${s2.findIndex(o => o.y1 === D.lastFull) >= 0 && s2.findIndex(o => o.y1 === D.lastFull) < 5 ? `${D.lastFull - 1}–${D.lastFull} was the ${ordinal(s2.findIndex(o => o.y1 === D.lastFull) + 1)} driest pair of years since 1889.` : ''}`,
     chart: `<svg class="chart" viewBox="0 0 ${W4} ${H4}" role="img" aria-label="Every year since 1889 as wetter or drier than typical" style="max-width:${W4 * 1.15}px">${g4}</svg>`,
     legend: `<span><i style="background:var(--warm)"></i>Drier than typical</span><span><i style="background:var(--cool)"></i>Wetter than typical</span>`,
     numbers: table(['Dry run', 'Years', 'Avg mm'], runs.map(r => ({ hl: r[r.length - 1] >= 2000, cells: [`${r[0]}–${r[r.length - 1]}`, r.length, nf.format(mean(r.map(y => D.annual[y])))] })), { note: `Runs of 3+ years below the typical ${mm(med)}. Driest 3-year stretches: ${s3.slice(0, 3).map(o => `${o.y0}–${o.y1} (${nf.format(o.v)} mm/yr)`).join(', ')}.` }),
     numbersLabel: 'See every dry run'
   });
 
-  // --- 5. memory
-  const q20 = quantile(ann, 0.2), q80 = quantile(ann, 0.8);
-  const after = (cond, test) => { const ys = full.filter(y => cond(D.annual[y]) && D.annual[y + 1] != null); return { n: ys.length, p: Math.round(ys.filter(y => test(D.annual[y + 1])).length / ys.length * 100) }; };
-  const aDry = after(v => v <= q20, v => v < med), aWet = after(v => v >= q80, v => v > med), aDryDry = after(v => v <= q20, v => v <= q20);
-  const q5 = card({
-    q: 'Does a dry year mean another one is coming?',
-    headline: 'No. Each year starts more or less fresh.',
-    explain: `After the driest fifth of years, the next year was below typical ${aDry.p}% of the time, close to a coin toss. A run of dry years is bad luck stacking up rather than a pattern that locks in, which is also why no one can reliably call next year from this one.`,
-    numbers: table(['After a…', 'Next year…', 'How often'], [
-      ['very dry year', 'below typical', aDry.p + '%'],
-      ['very dry year', 'very dry again', aDryDry.p + '%'],
-      ['very wet year', 'above typical', aWet.p + '%']
-    ], { note: `"Very dry" and "very wet" = driest and wettest fifth of years (below ${mm(q20)} or above ${mm(q80)}). By chance alone you'd expect about 50%, 20% and 50%.` })
-  });
-
-  el.innerHTML = q1 + q2 + q3 + q4 + q5 + `<p class="note">Tap any bar, dot or square for its numbers. El Niño and La Niña years follow the Bureau of Meteorology's event list.</p>`;
+  el.innerHTML = q1 + q2 + driversCard() + q4 + `<p class="note">Tap any bar, dot or square for its numbers. El Niño and La Niña years follow the Bureau of Meteorology's event list.</p>`;
   el.querySelectorAll('svg.chart').forEach(bindTips);
 }
 
 // ================================================================= RAIN: DRIVERS
-function renderDrivers(el) {
+function driversCard() {
   const months = [4, 5, 6, 7, 8, 9, 10];
   const refill = y => seasonTotal(y, months);
   const base = D.full.filter(y => y >= 1900), med = median(base.map(refill));
@@ -366,31 +345,14 @@ function renderDrivers(el) {
   const summer = y => (D.monthly[y][11] || 0) + D.monthly[y + 1][0] + D.monthly[y + 1][1] + D.monthly[y + 1][2];
   const sMed = median(d2.map(summer)), sAfter = set => Math.round(median(d2.filter(y => set(y)).map(summer)) / sMed * 100);
 
-  el.innerHTML =
-    `<div class="card">
-      <div class="q">What are these drivers?</div>
-      <p class="explain" style="margin-top:2px"><b>El Niño</b> is when the Pacific Ocean warms near the equator and pulls rain-making weather away from Australia. <b>La Niña</b> is the reverse. The <b>Indian Ocean Dipole (IOD)</b> is the same idea on our western side: in its positive phase the water near Australia cools and less moisture reaches us; negative is the reverse. Both matter most from autumn to spring, when our tanks refill.</p>
-    </div>` +
-    card({
-      q: 'Do they actually change our rain?',
-      headline: 'They tilt the odds, especially toward a dry refill season, but they don\'t decide it.',
-      explain: `In El Niño years the April–October refill season typically brings <b>${s['El Niño'].m}%</b> of normal, and ${s['El Niño'].below}% came in below typical. The Indian Ocean matters just as much: ${s['IOD +'].m}% in positive-IOD years, ${s['IOD −'].m}% in negative ones. La Niña does surprisingly little here (${s['La Niña'].m}%). Even with both dry signals together, ${100 - s['Both dry'].below}% of years still came in above typical.`,
-      chart: `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="April to October rain by climate driver">${g}</svg>`,
-      legend: `<span>Each dot is a year · the bar is the typical year${have ? ` · the ring is ${y0}` : ''}</span>`,
-      numbers: tbl
-    }) +
-    (have ? card({
-      q: `What about ${y0}?`,
-      headline: `${y0} had the classic dry setup and got a wet winter anyway.`,
-      explain: `${y0} is an El Niño year with a positive IOD. Its April–October rain was <b>${Math.round(v0 / med * 100)}% of typical</b>. That's not a contradiction, just the odds at work: in past years with the same setup, about ${100 - s['Both dry'].below}% still ended up above typical.`
-    }) : '') +
-    card({
-      q: 'And the summer after?',
-      headline: 'The drivers say little about summer rain here.',
-      explain: `Summers (Dec–Mar) after an El Niño year typically brought ${sAfter(y => D.EN.has(y))}% of normal; after La Niña, ${sAfter(y => D.LN.has(y))}%. Summer rain at Norton Summit is small and patchy either way, so tank planning should assume a normal dry summer.`
-    }) +
-    `<p class="note">Driver years from the Bureau of Meteorology. For the season ahead, see the <a href="https://www.bom.gov.au/climate/outlooks/" target="_blank" rel="noopener">BOM long-range forecast</a>.</p>`;
-  el.querySelectorAll('svg.chart').forEach(bindTips);
+  return card({
+    q: 'Do El Niño and the Indian Ocean matter?',
+    headline: 'They tilt the odds toward a dry refill season, but they don\'t decide it.',
+    explain: `<b>El Niño</b> (a warm Pacific) and a <b>positive Indian Ocean Dipole</b> (cool water off our north-west) both pull rain-making weather away from us; La Niña and a negative IOD do the reverse. In El Niño years April–October typically brings <b>${s['El Niño'].m}%</b> of normal, and ${s['El Niño'].below}% came in below typical. The Indian Ocean matters as much: ${s['IOD +'].m}% in positive years, ${s['IOD −'].m}% in negative ones. La Niña does surprisingly little here (${s['La Niña'].m}%).${have ? ` ${y0} had both dry signals and still got <b>${Math.round(v0 / med * 100)}%</b> of typical: the odds, not destiny.` : ''}`,
+    chart: `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="April to October rain by climate driver">${g}</svg>`,
+    legend: `<span>Each dot is a year · the bar is the typical year${have ? ` · the ring is ${y0}` : ''}</span>`,
+    numbers: tbl
+  });
 }
 
 // ================================================================= RAIN: EXPLORE (all the data, usefully)
@@ -462,16 +424,12 @@ function renderExplore(el) {
   el.querySelectorAll('svg.chart').forEach(bindTips);
 }
 
-// ================================================================= OUTLOOK
-const outlook = { rate: CONFIG.dailyUse, start: CONFIG.startTank, subset: 'all' };
+// ================================================================= TANKS: what's ahead (replaces the Outlook tab)
+const outlook = { rate: CONFIG.dailyUse, touched: false };
 function histories(subset) {
-  const today = new Date(), md = [today.getMonth(), today.getDate()];
-  const years = 3, days = 365 * years;
-  const out = [];
+  const today = new Date(), md = [today.getMonth(), today.getDate()], days = 365 * 3, out = [];
   for (const y of D.years) {
     if (subset === 'recent' && y < 1990) continue;
-    if (subset === 'elnino' && !D.EN.has(y)) continue;
-    if (subset === 'iodpos' && !D.IP.has(y)) continue;
     const i0 = Math.round((Date.UTC(y, md[0], md[1]) - D.start) / DAY);
     if (i0 < 0 || i0 + days > D.n) continue;
     out.push({ y, rain: D.daily.slice(i0, i0 + days) });
@@ -489,104 +447,236 @@ function simulate(rain, rate, start, days) {
   return { traj, min, minDay, hit };
 }
 function reliability(hs, rate, start, days) { return hs.filter(h => simulate(h.rain, rate, start, Math.min(days, h.rain.length)).hit === null).length / hs.length; }
-
-function renderOutlook() {
-  const el = $('#view-outlook');
-  el.innerHTML = `
-    <div class="view-head"><h1>Outlook</h1><span class="sub">your tanks × 137 years of rain</span></div>
-    <div class="card controls">
-      <div class="slider-row"><label for="o-rate">Daily use</label><input id="o-rate" type="range" min="250" max="800" step="10" value="${outlook.rate}"><output id="o-rate-out"></output></div>
-      <div class="slider-row"><label for="o-start">In tanks now</label><input id="o-start" type="range" min="10000" max="120000" step="500" value="${outlook.start}"><output id="o-start-out"></output></div>
-      <div class="pills" role="group" aria-label="Which years to replay">
-        ${[['all', 'All years'], ['recent', 'Since 1990'], ['elnino', 'After El Niño'], ['iodpos', 'After IOD +']].map(([k, l]) => `<button data-subset="${k}" aria-pressed="${outlook.subset === k}">${l}</button>`).join('')}
-      </div>
-    </div>
-    <div id="o-body"></div>`;
-  const upd = () => drawOutlook();
-  $('#o-rate').oninput = e => { outlook.rate = +e.target.value; outlook.touched = true; upd(); };
-  $('#o-start').oninput = e => { outlook.start = +e.target.value; outlook.touched = true; upd(); };
-  el.querySelectorAll('[data-subset]').forEach(b => b.onclick = () => { outlook.subset = b.dataset.subset; el.querySelectorAll('[data-subset]').forEach(x => x.setAttribute('aria-pressed', x === b)); upd(); });
-  drawOutlook();
+function syncOutlookFromTanks() {
+  if (!T.data) return;
+  if (!outlook.touched) outlook.rate = Math.round(T.data.totals.recentRate / 10) * 10;
+  CONFIG.capacity = T.data.settings.capacityLitres; CONFIG.reserve = T.data.settings.reserveLitres;
 }
 
-function drawOutlook() {
-  $('#o-rate-out').textContent = nf.format(outlook.rate) + ' L/day';
-  $('#o-start-out').textContent = nf.format(outlook.start) + ' L';
-  const hs = histories(outlook.subset), days = 365 * 3;
-  const sims = hs.map(h => Object.assign(simulate(h.rain, outlook.rate, outlook.start, days), { y: h.y }));
-  const n = sims.length;
+function aheadCard(start) {
+  return `<div class="card" id="t-ahead">
+    <div class="q">What's ahead for the tanks?</div>
+    <div id="ah-answer"></div>
+    <div class="slider-row" style="margin:6px 0 4px"><label for="ah-rate">If we use</label><input id="ah-rate" type="range" min="250" max="800" step="10" value="${outlook.rate}"><output id="ah-out"></output></div>
+    <div class="chart-wrap" id="ah-chart"></div>
+    <div class="legend"><span><i class="line" style="background:var(--water)"></i>Typical year</span><span><i style="background:var(--band2)"></i>Middle half</span><span><i style="background:var(--band)"></i>8 in 10 years</span><span><i class="line" style="background:var(--warn)"></i>Worst on record</span></div>
+    <details><summary>See the odds</summary><div id="ah-table"></div></details>
+  </div>`;
+}
+function drawAhead(start) {
+  const rate = outlook.rate, hs = histories('all'), days = 365 * 3;
+  $('#ah-out').textContent = nf.format(rate) + ' L/day';
+  const sims = hs.map(h => Object.assign(simulate(h.rain, rate, start, days), { y: h.y })), n = sims.length;
   const within = d => sims.filter(s => s.hit !== null && s.hit < d).length;
-  const c12 = within(365), c24 = within(730), c36 = within(1095);
-  const lows1 = sims.map(s => Math.min(...s.traj.slice(0, 365)));
-  const lowDays = sims.map(s => { let mi = 0; for (let i = 1; i < 365; i++) if (s.traj[i] < s.traj[mi]) mi = i; return mi; });
-  const lowMonth = (() => { const c = {}; lowDays.forEach(d => { const m = new Date(Date.now() + d * DAY).getMonth(); c[m] = (c[m] || 0) + 1; }); return +Object.entries(c).sort((a, b) => b[1] - a[1])[0][0]; })();
-  const worst = sims.slice().sort((a, b) => a.min - b.min).slice(0, 3);
-
-  // fan chart (weekly percentiles)
-  const W = 340, H = 220, pl = 36, pr = 8, pt = 10, pb = 22;
+  const c12 = within(365), c36 = within(1095);
+  const lows = sims.map(s => Math.min(...s.traj.slice(0, 365)));
+  const worst = sims.slice().sort((a, b) => a.min - b.min)[0];
+  const safe = (() => { let lo = 200, hi = 800; for (let i = 0; i < 9; i++) { const mid = (lo + hi) / 2; if (reliability(hs, mid, start, days) >= 0.95) lo = mid; else hi = mid; } return Math.floor(lo / 10) * 10; })();
+  const head = c12 === 0 && c36 / n <= 0.05 ? 'No trouble in sight at this rate.' : c12 === 0 ? 'Fine for the next year; the risk builds after that.' : c12 / n <= 0.1 ? 'Mostly fine, with a small chance of running low within a year.' : 'A real chance of running low within a year at this rate.';
+  $('#ah-answer').innerHTML = `<h3 class="answer">${head}</h3>
+    <p class="explain">We ran your tanks through every year of rain since 1889, starting today. At ${nf.format(rate)} L a day, ${c12 === 0 ? 'none' : `${c12} of ${n}`} reached the pump reserve within a year, and ${c36 === 0 ? 'none' : `about 1 in ${Math.max(1, Math.round(n / c36))}`} within three. About <b>${safe} L a day</b> stays safe in 19 of 20.</p>`;
+  const W = 340, H = 190, pl = 34, pr = 8, pt = 8, pb = 22;
   const X = i => pl + i / (days - 1) * (W - pl - pr), Y = v => pt + (1 - v / CONFIG.capacity) * (H - pt - pb);
   const idx = []; for (let i = 0; i < days; i += 7) idx.push(i); idx.push(days - 1);
   const q = qq => idx.map(i => [X(i), Y(quantile(sims.map(s => s.traj[i]), qq))]);
-  let g = yAxis(Y, [0, 30000, 60000, 90000, 120000], W, pl, pr, v => v / 1000 + 'k');
+  let g = yAxis(Y, [0, 40000, 80000, 120000], W, pl, pr, v => v / 1000 + 'k');
   g += `<rect x="${pl}" y="${Y(CONFIG.reserve)}" width="${W - pl - pr}" height="${Y(0) - Y(CONFIG.reserve)}" fill="rgba(194,65,12,.12)"/><text x="${pl + 4}" y="${Y(0) - 3}" style="font-size:10px;fill:var(--warn)">pump reserve</text>`;
-  g += `<path d="${area(q(0.9), q(0.1))}" fill="var(--band)"/>`;
-  g += `<path d="${area(q(0.75), q(0.25))}" fill="var(--band2)"/>`;
+  g += `<path d="${area(q(0.9), q(0.1))}" fill="var(--band)"/><path d="${area(q(0.75), q(0.25))}" fill="var(--band2)"/>`;
   g += `<path d="${path(q(0.5))}" fill="none" stroke="var(--water)" stroke-width="2.5" stroke-linejoin="round"/>`;
-  const worstPts = idx.map(i => [X(i), Y(worst[0].traj[i])]);
-  g += `<path d="${path(worstPts)}" fill="none" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="4 3"/>`;
+  g += `<path d="${path(idx.map(i => [X(i), Y(worst.traj[i])]))}" fill="none" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="4 3"/>`;
   const t0 = new Date();
-  for (let k = 0; k <= 36; k += 6) {
-    const d = new Date(t0.getFullYear(), t0.getMonth() + k, 1), i = Math.round((d - t0) / DAY);
-    if (i < 0 || i >= days) continue;
-    g += `<text x="${X(i)}" y="${H - 6}" text-anchor="middle">${MON[d.getMonth()]}${d.getMonth() === 0 || k === 0 ? ' ' + String(d.getFullYear()).slice(2) : ''}</text>`;
-  }
-  for (let i = 0; i < days; i += 14) {
-    const vals = sims.map(s => s.traj[i]);
-    g += `<rect x="${X(i)}" y="0" width="${(W - pl - pr) / (days / 14) + 0.5}" height="${H - pb}" fill="transparent" data-tip="<b>${new Date(t0.getTime() + i * DAY).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</b><br>Typical: ${nf.format(quantile(vals, 0.5))} L<br>8 in 10 years: ${nf.format(quantile(vals, 0.1))}–${nf.format(quantile(vals, 0.9))} L"/>`;
-  }
+  for (let k = 0; k <= 36; k += 6) { const d = new Date(t0.getFullYear(), t0.getMonth() + k, 1), i = Math.round((d - t0) / DAY); if (i >= 0 && i < days) g += `<text x="${X(i)}" y="${H - 6}" text-anchor="middle">${MON[d.getMonth()]}${d.getMonth() < 6 && k ? " '" + String(d.getFullYear()).slice(2) : ''}</text>`; }
+  for (let i = 0; i < days; i += 14) { const v = sims.map(s => s.traj[i]); g += `<rect x="${X(i)}" y="0" width="${(W - pl - pr) / (days / 14) + 0.5}" height="${H - pb}" fill="transparent" data-tip="<b>${new Date(t0.getTime() + i * DAY).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</b><br>Typical: ${nf.format(quantile(v, 0.5))} L<br>8 in 10 years: ${nf.format(quantile(v, 0.1))}–${nf.format(quantile(v, 0.9))} L"/>`; }
+  $('#ah-chart').innerHTML = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Range of tank levels over the next three years">${g}</svg>`;
+  bindTips($('#ah-chart svg'));
+  const pc = c => Math.round(c / n * 100) + '%';
+  $('#ah-table').innerHTML = table(['At ' + nf.format(rate) + ' L/day', ''], [
+    ['Chance of reaching the pump reserve within 6 months', pc(within(182))],
+    ['… within 12 months', pc(c12)], ['… within 2 years', pc(within(730))], ['… within 3 years', pc(c36)],
+    ['Typical low point in the next year', nf.format(Math.round(median(lows) / 1000) * 1000) + ' L'],
+    ['Low point in the worst 1 in 10 years', nf.format(Math.round(quantile(lows, 0.1) / 1000) * 1000) + ' L'],
+    ['Worst rain on record for this start date', `${worst.y}–${String(worst.y + 3).slice(2)}`],
+    ['Safe steady use (19 in 20 runs)', safe + ' L/day']
+  ], { note: `Every year since 1889 replayed from today's date: ${nf.format(CONFIG.capacity)} L tanks, ${nf.format(LPM)} L caught per mm, overflow when full. Odds, not a forecast; the Genie tab shows how a drying climate shifts them.` });
+}
 
-  // reliability curve (5 years needs 5-year histories; use 3-year window consistently)
-  const rates = []; for (let r = 300; r <= 700; r += 20) rates.push(r);
-  const rel = rates.map(r => reliability(hs, r, outlook.start, days) * 100);
-  const W2 = 340, H2 = 170, pl2 = 36, pr2 = 8, pt2 = 10, pb2 = 24;
-  const X2 = r => pl2 + (r - 300) / 400 * (W2 - pl2 - pr2), Y2 = v => pt2 + (1 - v / 100) * (H2 - pt2 - pb2);
-  let g2 = yAxis(Y2, [0, 50, 100], W2, pl2, pr2, v => v + '%');
-  g2 += `<path d="${path(rates.map((r, i) => [X2(r), Y2(rel[i])]))}" fill="none" stroke="var(--water)" stroke-width="2.5" stroke-linejoin="round"/>`;
-  rates.forEach((r, i) => g2 += `<circle cx="${X2(r)}" cy="${Y2(rel[i])}" r="9" fill="transparent" data-tip="<b>${r} L/day</b><br>Stays clear of the reserve in ${Math.round(rel[i])}% of rain histories over 3 years"/>`);
-  const safe = rates.filter((r, i) => rel[i] >= 95).pop();
-  if (safe) g2 += `<line x1="${X2(safe)}" x2="${X2(safe)}" y1="${pt2}" y2="${H2 - pb2}" stroke="var(--good)" stroke-dasharray="3 3"/><text x="${X2(safe) - 4}" y="${pt2 + 10}" text-anchor="end" style="fill:var(--good);font-weight:600">${safe} L/day</text>`;
-  g2 += `<line x1="${X2(outlook.rate)}" x2="${X2(outlook.rate)}" y1="${pt2}" y2="${H2 - pb2}" stroke="var(--ink)" stroke-width="1.5"/><text x="${X2(outlook.rate) + 4}" y="${H2 - pb2 - 6}" style="fill:var(--ink)">you</text>`;
-  [300, 400, 500, 600, 700].forEach(r => g2 += `<text x="${X2(r)}" y="${H2 - 8}" text-anchor="middle">${r}</text>`);
+// ================================================================= RAIN GENIE 🧞 (up to 50 years ahead)
+// Method: real past years (1950–latest) are re-dealt at random into the future, rescaled so their
+// seasons match the 1986–2005 baseline, then shifted by the projected seasonal change for that year.
+// Projected change: Goyder Institute SA Climate Ready, Adelaide & Mount Lofty Ranges, 15 CMIP5 models,
+// % change in seasonal rain vs 1986–2005 (mean, 10th, 90th percentile of the models).
+const PROJ = {
+  base: 1996, years: [2030, 2050, 2070, 2090],
+  medium: { DJF: [[-7.5, -19.3, 3.0], [-6.6, -20.5, 4.8], [-9.0, -18.1, 4.9], [-9.4, -22.7, 1.7]],
+            MAM: [[-3.8, -12.3, 5.9], [-3.9, -11.2, 9.3], [-7.3, -16.7, 3.9], [-7.7, -14.8, -0.7]],
+            JJA: [[-2.7, -9.5, 3.1], [-5.3, -12.0, 1.2], [-6.0, -13.6, 3.6], [-5.7, -10.9, 2.4]],
+            SON: [[-8.8, -16.9, 0.8], [-12.9, -21.7, -6.6], [-16.7, -26.4, -9.0], [-17.8, -24.4, -11.5]] },
+  high:   { DJF: [[-4.4, -12.6, 7.6], [-10.8, -22.8, -5.7], [-13.8, -26.8, -0.9], [-19.9, -33.0, -6.6]],
+            MAM: [[-4.7, -16.6, 3.2], [-6.0, -16.6, 5.4], [-14.6, -28.7, -0.6], [-17.9, -34.6, -2.7]],
+            JJA: [[-5.1, -10.6, -1.1], [-6.3, -13.9, -0.2], [-11.2, -20.8, -2.6], [-15.6, -27.3, -6.9]],
+            SON: [[-12.1, -19.2, -5.1], [-17.1, -28.5, -7.5], [-24.4, -38.6, -13.4], [-31.7, -49.8, -21.4]] }
+};
+const SEASON_OF_MONTH = ['DJF', 'DJF', 'MAM', 'MAM', 'MAM', 'JJA', 'JJA', 'JJA', 'SON', 'SON', 'SON', 'DJF'];
+function projChange(scen, season, year, z) { // % change for a given year and model draw z (normal score)
+  if (scen === 'recent') return 0;
+  const rows = PROJ[scen][season], xs = [PROJ.base].concat(PROJ.years), pts = [[0, 0, 0]].concat(rows);
+  const y = Math.min(Math.max(year, PROJ.base), 2090);
+  let i = 0; while (i < xs.length - 2 && y > xs[i + 1]) i++;
+  const f = (y - xs[i]) / (xs[i + 1] - xs[i]), lerp = k => pts[i][k] + f * (pts[i + 1][k] - pts[i][k]);
+  const m = lerp(0), lo = lerp(1), hi = lerp(2);
+  return m + z * (z >= 0 ? (hi - m) : (m - lo)) / 1.2816;
+}
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function normal(r) { let u = 0, v = 0; while (!u) u = r(); while (!v) v = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
 
-  const pct = c => Math.round(c / n * 100);
-  const subsetLabel = { all: `all ${n} years since 1889`, recent: `the ${n} years since 1990`, elnino: `the ${n} El Niño years`, iodpos: `the ${n} positive-IOD years` }[outlook.subset];
-  const safeNow = c12 === 0, verdict = safeNow ? (pct(c36) <= 10 ? 'You\'re in good shape.' : 'You\'re fine for the next year; the risk builds after that.') : (pct(c12) <= 10 ? 'Mostly fine, with a small risk within a year.' : 'There\'s a real risk of running low within a year.');
-  $('#o-body').innerHTML = `
-    <div class="card">
-      <div class="q">Will we run out?</div>
-      <h3 class="answer">${verdict}</h3>
-      <p class="explain">We replayed your tanks through ${subsetLabel}, starting from today with ${nf.format(outlook.start)} L and using ${nf.format(outlook.rate)} L a day. ${c12 === 0 ? 'In none of them did you reach the pump reserve within 12 months.' : `In ${c12} of ${n} you reached the pump reserve within 12 months.`} Over three years, ${c36 === 0 ? 'none did' : `${c36} in ${n} did (about 1 in ${Math.max(1, Math.round(n / c36))})`}.</p>
-      <div class="stat3" style="margin-top:12px">
-        <div><b>${pct(c12)}%</b><span>chance of hitting the reserve in 12 months</span></div>
-        <div><b>${pct(c24)}%</b><span>within 2 years</span></div>
-        <div><b>${pct(c36)}%</b><span>within 3 years</span></div>
-      </div>
-      <p class="lead" style="margin-top:12px">The usual low point is around <b>${MON[lowMonth]}</b>, at about <b>${nf.format(Math.round(median(lows1) / 1000) * 1000)} L</b>. In the worst 1 in 10 years it gets down to ${nf.format(Math.round(quantile(lows1, 0.1) / 1000) * 1000)} L.</p>
+const G = { cache: {}, scen: 'medium', year: 2050 };
+function genieModel(scen) {
+  if (G.cache[scen]) return G.cache[scen];
+  const pool = D.full.filter(y => y >= 1950 && y <= D.lastFull);
+  // rescale the pool so each season averages what 1986–2005 did
+  const seasonTot = (ys, s) => mean(ys.map(y => D.monthly[y].reduce((t, v, m) => t + (SEASON_OF_MONTH[m] === s ? v : 0), 0)));
+  const base = scen === 'recent' ? D.full.filter(y => y > D.lastFull - 20) : D.full.filter(y => y >= 1986 && y <= 2005), adj = {};
+  ['DJF', 'MAM', 'JJA', 'SON'].forEach(s => adj[s] = seasonTot(base, s) / seasonTot(pool, s));
+  const N = 400, Y0 = D.endYear + 1, Y1 = D.endYear + 50, r = rng(scen === 'high' ? 7 : scen === 'recent' ? 11 : 3);
+  const paths = [];
+  for (let p = 0; p < N; p++) {
+    const z = Math.max(-2.2, Math.min(2.2, normal(r))), yrs = [];
+    for (let y = Y0; y <= Y1; y++) {
+      const src = pool[Math.floor(r() * pool.length)];
+      const fac = {}; ['DJF', 'MAM', 'JJA', 'SON'].forEach(s => fac[s] = adj[s] * (1 + projChange(scen, s, y, z) / 100));
+      yrs.push({ y, src, fac, total: D.monthly[src].reduce((t, v, m) => t + v * fac[SEASON_OF_MONTH[m]], 0) });
+    }
+    paths.push({ z, yrs });
+  }
+  const baseMean = mean(base.map(y => D.annual[y]));
+  const m = { scen, paths, pool, adj, Y0, Y1, baseMean, longMean: mean(D.full.map(y => D.annual[y])) };
+  G.cache[scen] = m; return m;
+}
+// daily rain for one future water-year (Dec–Nov) built from a source year with seasonal factors
+function waterYearDaily(src, fac) {
+  const out = new Float32Array(365), i0 = Math.round((Date.UTC(src - 1, 11, 1) - D.start) / DAY);
+  for (let i = 0; i < 365; i++) { const v = D.daily[i0 + i] || 0, mo = new Date(D.start + (i0 + i) * DAY).getUTCMonth(); out[i] = v * fac[SEASON_OF_MONTH[mo]]; }
+  return out;
+}
+function safeUse(model, centreYear, startTank) { // steady L/day that stays clear of the reserve in 19 of 20 three-year runs
+  const r = rng(4242), runs = []; // same years for every decade, so differences are the climate shift alone
+  model.paths.forEach(p => {
+    const seq = new Float32Array(365 * 3);
+    for (let k = 0; k < 3; k++) {
+      const src = model.pool[Math.floor(r() * model.pool.length)];
+      if (src - 1 < 1889) { k--; continue; }
+      const fac = {}; ['DJF', 'MAM', 'JJA', 'SON'].forEach(s => fac[s] = model.adj[s] * (1 + projChange(model.scen, s, centreYear, p.z) / 100));
+      seq.set(waterYearDaily(src, fac), k * 365);
+    }
+    runs.push(seq);
+  });
+  const ok = rate => runs.filter(seq => simulate(seq, rate, startTank, seq.length).hit === null).length / runs.length;
+  let lo = 200, hi = 800;
+  for (let i = 0; i < 9; i++) { const mid = (lo + hi) / 2; if (ok(mid) >= 0.95) lo = mid; else hi = mid; }
+  return Math.floor(lo / 10) * 10;
+}
+
+function renderGenie() {
+  const el = $('#view-genie');
+  const m = genieModel(G.scen), Y = G.year;
+  const yrsIdx = y => y - m.Y0;
+  // typical year around Y: median over paths of the 20-year mean centred on Y (clipped to the horizon)
+  const win = y => { const a = Math.max(m.Y0, y - 10), b = Math.min(m.Y1, y + 9); return [a, b]; };
+  const pathMean = (p, a, b) => mean(p.yrs.slice(yrsIdx(a), yrsIdx(b) + 1).map(o => o.total));
+  const [a, b] = win(Y), means = m.paths.map(p => pathMean(p, a, b));
+  const typ = median(means), typLo = quantile(means, 0.1), typHi = quantile(means, 0.9);
+  const chgBase = (typ / m.baseMean - 1) * 100, chgLong = (typ / m.longMean - 1) * 100;
+  const dryLine = quantile(D.full.map(y => D.annual[y]), 0.1); // driest 1 in 10 of the past
+  const singleYears = m.paths.map(p => p.yrs[yrsIdx(Math.min(Y, m.Y1))].total);
+  const pDry = singleYears.filter(v => v <= dryLine).length / singleYears.length;
+  const seasonsAt = ['SON', 'JJA', 'MAM', 'DJF'].map(s => ({ s, c: projChange(G.scen, s, Y, 0), lo: projChange(G.scen, s, Y, -1.2816), hi: projChange(G.scen, s, Y, 1.2816) }));
+  const sName = { DJF: 'summer', MAM: 'autumn', JJA: 'winter', SON: 'spring' };
+  const recent20 = mean(D.full.filter(y => y > D.lastFull - 20).map(y => D.annual[y]));
+  const recentChg = (recent20 / m.baseMean - 1) * 100;
+  const scenWord = { medium: 'if the world keeps cutting emissions at a moderate pace', high: 'if emissions stay high', recent: 'if the last 20 years turn out to be the new normal' }[G.scen];
+  const vsRecent = (typ / recent20 - 1) * 100;
+
+  // chart: past annual totals + 20-yr average, then the future band to Y1
+  const W = 340, H = 220, pl = 34, pr = 8, pt = 10, pb = 22, x0 = 1950, x1 = m.Y1;
+  const X = y => pl + (y - x0) / (x1 - x0) * (W - pl - pr), ymax = 1300, Yv = v => pt + (1 - v / ymax) * (H - pt - pb);
+  let g = yAxis(Yv, [0, 400, 800, 1200], W, pl, pr);
+  D.full.filter(y => y >= x0).forEach(y => g += `<rect x="${X(y) - 0.9}" y="${Yv(D.annual[y])}" width="1.8" height="${Yv(0) - Yv(D.annual[y])}" fill="var(--neutral)" opacity=".55" data-tip="<b>${y}</b>: ${mm(D.annual[y])}"/>`);
+  const pastAvg = []; for (let y = x0 + 9; y <= D.lastFull; y++) pastAvg.push([X(y), Yv(mean(D.full.filter(yy => yy > y - 20 && yy <= y).map(yy => D.annual[yy])))]);
+  g += `<path d="${path(pastAvg)}" fill="none" stroke="var(--ink)" stroke-width="2.2"/>`;
+  const fut = [], single = [];
+  for (let y = m.Y0; y <= m.Y1; y++) {
+    const [aa, bb] = win(y), ms = m.paths.map(p => pathMean(p, aa, bb)), ss = m.paths.map(p => p.yrs[yrsIdx(y)].total);
+    fut.push({ y, lo: quantile(ms, 0.1), md: median(ms), hi: quantile(ms, 0.9) });
+    single.push({ y, lo: quantile(ss, 0.1), hi: quantile(ss, 0.9) });
+  }
+  g += `<path d="${area(single.map(o => [X(o.y), Yv(o.hi)]), single.map(o => [X(o.y), Yv(o.lo)]))}" fill="var(--band)"/>`;
+  g += `<path d="${area(fut.map(o => [X(o.y), Yv(o.hi)]), fut.map(o => [X(o.y), Yv(o.lo)]))}" fill="var(--band2)"/>`;
+  g += `<path d="${path(fut.map(o => [X(o.y), Yv(o.md)]))}" fill="none" stroke="var(--water)" stroke-width="2.5" stroke-dasharray="5 3"/>`;
+  g += `<line x1="${X(Y)}" x2="${X(Y)}" y1="${pt}" y2="${H - pb}" stroke="var(--ink)" stroke-width="1.2"/><circle cx="${X(Y)}" cy="${Yv(typ)}" r="5" fill="var(--water)" stroke="var(--card)" stroke-width="2"/>`;
+  g += `<line x1="${X(D.endYear)}" x2="${X(D.endYear)}" y1="${pt}" y2="${H - pb}" stroke="var(--ink-3)" stroke-dasharray="2 3"/><text x="${X(D.endYear) + 3}" y="${pt + 9}">now</text>`;
+  [1950, 1975, 2000, 2025, 2050, 2075].forEach(y => { if (y <= x1) g += `<text x="${X(y)}" y="${H - 6}" text-anchor="middle">${y}</text>`; });
+  fut.forEach((o, i) => { if (i % 2 === 0) g += `<rect x="${X(o.y) - 3}" y="0" width="6.5" height="${H - pb}" fill="transparent" data-tip="<b>Around ${o.y}</b><br>Typical year: ${mm(o.md)}<br>Likely range of the average: ${nf.format(o.lo)}–${nf.format(o.hi)} mm<br>Single years: ${nf.format(single[i].lo)}–${nf.format(single[i].hi)} mm (8 in 10)"/>`; });
+
+  el.innerHTML = `
+    <div class="view-head"><h1>Rain Genie <span aria-hidden="true">🧞</span></h1><span class="sub">Norton Summit to ${m.Y1}</span></div>
+    <div class="card genie">
+      <div class="q">Ask the genie</div>
+      <div class="pills" role="group" aria-label="When">${[[D.endYear + 10, 'In 10 years'], [2050, '2050'], [D.endYear + 25, 'In 25 years'], [m.Y1, 'In 50 years']].map(([y, l]) => `<button data-gy="${y}" aria-pressed="${Y === y}">${l}</button>`).join('')}</div>
+      <div class="slider-row" style="margin-top:10px"><label for="g-year">Year</label><input id="g-year" type="range" min="${m.Y0 + 4}" max="${m.Y1}" step="1" value="${Y}"><output>${Y}</output></div>
+      <div class="seg" style="margin:10px 0 0">${[['medium', 'Moderate'], ['high', 'High emissions'], ['recent', 'Like last 20 yrs']].map(([k2, l]) => `<button data-gs="${k2}" aria-selected="${G.scen === k2}">${l}</button>`).join('')}</div>
     </div>
     <div class="card">
-      <div class="q">What will the tanks look like?</div>
-      <h3 class="answer">Down through summer, lowest around ${MON[lowMonth]}, then winter refills them.</h3>
-      <div class="chart-wrap"><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Range of tank levels over the next three years">${g}</svg></div>
-      <div class="legend"><span><i class="line" style="background:var(--water)"></i>Typical</span><span><i style="background:var(--band2)"></i>Middle half</span><span><i style="background:var(--band)"></i>8 in 10 years</span><span><i class="line" style="background:var(--warn)"></i>Worst: rain from ${worst[0].y}</span></div>
+      <div class="q">What will rain look like around ${Y}?</div>
+      <h3 class="answer">A typical year brings about ${nf.format(Math.round(typ / 10) * 10)} mm${G.scen === 'recent' ? '' : `, roughly ${Math.abs(Math.round(chgBase))}% less than 1986–2005`}.</h3>
+      <p class="explain">That's ${scenWord}. ${G.scen === 'recent' ? `This assumes no further drying, but no recovery either.` : `Compared with what we've actually had over the last 20 years (${mm(recent20)}), that's ${Math.abs(vsRecent) < 3 ? 'about the same' : `${Math.abs(Math.round(vsRecent))}% ${vsRecent > 0 ? 'wetter' : 'drier'}`}${vsRecent > 3 ? ': the recent past has run drier than the models expected, so also check "Like the last 20 years"' : ''}. The models' range for the typical year is ${nf.format(typLo)}–${nf.format(typHi)} mm.`} ${G.scen === 'recent' ? '' : `The biggest change is in <b>${sName[seasonsAt[0].s]}</b> (${pctTxt(seasonsAt[0].c)}); ${sName[seasonsAt[1].s]} changes ${pctTxt(seasonsAt[1].c)}. `}Individual years will still swing a lot: a really dry year, the kind that used to come 1 year in 10, becomes about <b>${pDry >= 0.15 ? `1 in ${Math.max(2, Math.round(1 / pDry))}` : '1 in 10 still'}</b>.</p>
+      <div class="chart-wrap"><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Annual rain since 1950 and the projected range to ${m.Y1}">${g}</svg></div>
+      <div class="legend"><span><i style="background:var(--neutral);opacity:.6"></i>Past years</span><span><i class="line" style="background:var(--ink)"></i>20-year average</span><span><i class="line" style="background:var(--water)"></i>Projected typical year</span><span><i style="background:var(--band2)"></i>Model range</span><span><i style="background:var(--band)"></i>Single years (8 in 10)</span></div>
+      ${G.scen === 'recent' ? '' : `<details><summary>Season by season around ${Y}</summary>`}${table(['Season', 'Change', 'Models range'], seasonsAt.map(o => [cap(sName[o.s]), pctTxt(o.c), `${pctTxt(o.lo)} to ${pctTxt(o.hi)}`]), { note: 'Change in average rain compared with 1986–2005. Range = 10th to 90th percentile of 15 climate models.' })}${G.scen === 'recent' ? '' : '</details>'}
+    </div>
+    <div class="card" id="g-tanks">
+      <div class="q">Will our tanks still cope?</div>
+      <h3 class="answer">Working it out…</h3>
     </div>
     <div class="card">
-      <div class="q">How much can we use?</div>
-      <h3 class="answer">${safe ? `About ${safe} L a day is the safe steady amount.` : 'Less than you are now.'}</h3>
-      <div class="chart-wrap"><svg class="chart" viewBox="0 0 ${W2} ${H2}" role="img" aria-label="Chance of staying clear of the reserve at each daily use">${g2}</svg></div>
-      <p class="small" style="margin-top:6px">${safe ? `About <b>${safe} L/day</b> keeps you clear of the pump reserve in 19 of 20 rain histories over the next 3 years.` : 'No steady daily use keeps you clear in 19 of 20 histories from this starting level.'} Using more in summer and less in winter helps, as does a fuller tank going into summer.</p>
+      <div class="q">How sure is the genie?</div>
+      <h3 class="answer">Sure about the direction, much less sure about the size.</h3>
+      <p class="explain">Almost every climate model has southern Australia drying in spring, and the region's projections agree. How much depends on emissions and on which model you trust, which is why there's a range.</p>
+      <p class="explain">The last 20 years have averaged <b>${mm(recent20)}</b>, ${Math.abs(Math.round(recentChg))}% ${recentChg < 0 ? 'below' : 'above'} the 1986–2005 baseline. That's already as dry as the models expect for the ${recentChg <= -12 ? '2060s–70s' : recentChg <= -7 ? '2040s–50s' : '2030s'}. Part of that is natural swing: 1986–2005 was a wetter-than-usual stretch, and the Millennium drought sits inside the last 20 years. But it means these projections are not alarmist; if anything, the recent past has run drier.</p>
+      <p class="explain">The genie can't tell you whether 2031 will be wet. Year-to-year luck still matters more than the trend for any single year. What it shows is the odds shifting.</p>
     </div>
-    <p class="note">${T.data && !outlook.touched ? `Starting level and daily use come from your latest tank figures. ` : ''}Replays your tanks through ${subsetLabel}, starting from today's date each year: ${nf.format(CONFIG.capacity)} L capacity, ${nf.format(LPM)} L caught per mm (${CONFIG.roofM2} m² roof at ${Math.round(CONFIG.efficiency * 100)}%), overflow when full. Odds, not a forecast: past rain doesn't promise future rain, and the drying since 1990 shows up in the "Since 1990" view.</p>`;
-  $('#o-body').querySelectorAll('svg.chart').forEach(bindTips);
+    <p class="note">How it works: real Norton Summit years since 1950 are dealt at random into the future 400 times, rescaled to the 1986–2005 climate, then adjusted by the projected change for each season and year. Projections: Goyder Institute "SA Climate Ready" downscaled projections for the Adelaide and Mount Lofty Ranges region (15 CMIP5 climate models; moderate = RCP4.5, high = RCP8.5).</p>`;
+  el.querySelectorAll('svg.chart').forEach(bindTips);
+  el.querySelectorAll('[data-gy]').forEach(bt => bt.onclick = () => { G.year = +bt.dataset.gy; renderGenie(); });
+  el.querySelectorAll('[data-gs]').forEach(bt => bt.onclick = () => { G.scen = bt.dataset.gs; renderGenie(); });
+  const sl = $('#g-year'); sl.oninput = () => { sl.nextElementSibling.textContent = sl.value; }; sl.onchange = () => { G.year = +sl.value; renderGenie(); };
+  // tanks by decade, computed after paint
+  setTimeout(() => {
+    const key = 'tanks-' + G.scen + (T.data ? '-live' : '');
+    if (!G.cache[key]) {
+      const start = T.data ? Math.max(60000, T.data.now.tank) : 110000, decades = [D.endYear + 1, 2035, 2045, 2055, 2065, 2075].filter(y => y <= m.Y1);
+      G.cache[key] = decades.map(y => ({ y, safe: safeUse(m, y, start) }));
+    }
+    const rows = G.cache[key], use = T.data ? Math.round(T.data.totals.recentRate) : CONFIG.dailyUse;
+    const nowSafe = rows[0].safe, atY = rows.reduce((best, r) => Math.abs(r.y - Y) < Math.abs(best.y - Y) ? r : best, rows[0]);
+    const Wb = 340, Hb = 170, plb = 34, prb = 8, ptb = 14, pbb = 22, bw = (Wb - plb - prb) / rows.length;
+    const ymaxb = 600, Yb = v => ptb + (1 - v / ymaxb) * (Hb - ptb - pbb);
+    let gb = yAxis(Yb, [0, 200, 400, 600], Wb, plb, prb);
+    rows.forEach((r, i) => {
+      const x = plb + i * bw + 6, w = bw - 12;
+      gb += `<rect x="${x}" y="${Yb(r.safe)}" width="${w}" height="${Yb(0) - Yb(r.safe)}" rx="4" fill="var(--water)" opacity="${r.y === atY.y ? 1 : .55}" data-tip="<b>${i ? `${r.y - 5}s` : 'Next few years'}</b><br>About ${r.safe} L/day keeps you clear of the pump reserve in 19 of 20 runs"/>`;
+      gb += `<text class="lbl" x="${x + w / 2}" y="${Yb(r.safe) - 4}" text-anchor="middle" style="font-weight:600">${r.safe}</text>`;
+      gb += `<text x="${x + w / 2}" y="${Hb - 6}" text-anchor="middle">${i ? `${r.y - 5}s` : 'Next few yrs'}</text>`;
+    });
+    gb += `<line x1="${plb}" x2="${Wb - prb}" y1="${Yb(use)}" y2="${Yb(use)}" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="5 4"/><text x="${plb + 2}" y="${Yb(use) - 4}" style="fill:var(--ink);font-weight:600">you now: ${use}</text>`;
+    const drop = nowSafe - atY.safe;
+    $('#g-tanks').innerHTML = `
+      <div class="q">Will our tanks still cope?</div>
+      <h3 class="answer">${drop <= 15 ? `Yes, with little change to how much you can use.` : `Yes, if daily use comes down by about ${Math.round(drop / 10) * 10} L by the ${atY.y - 5}s.`}</h3>
+      <p class="explain">Same 120,000 L tanks and 270 m² roof. Over the next few years about <b>${nowSafe} L a day</b> is safe year in, year out (staying clear of the pump reserve in 19 of 20 three-year runs). Around ${Y} that becomes about <b>${atY.safe} L</b>. ${drop <= 15 ? 'Why so little change? Your tanks fill and overflow most winters, so a drier climate mostly trims water that would have spilled anyway. ' : ''}More roof area or another tank would push these numbers back up.</p>
+      <div class="chart-wrap"><svg class="chart" viewBox="0 0 ${Wb} ${Hb}" role="img" aria-label="Safe daily use by decade">${gb}</svg></div>
+      <details><summary>Safe daily use by decade</summary>${table(['Decade', 'Safe L/day', 'Change'], rows.map((r, i) => ({ hl: r.y === atY.y, cells: [i ? `${r.y - 5}s` : 'Next few years', r.safe, i ? pctTxt((r.safe / nowSafe - 1) * 100) : '–'] })), { note: `Each run starts on 1 December with ${T.data ? 'today\'s tank level' : '110,000 L'} and uses years since 1950 adjusted to each decade's climate, so "next few years" can differ a little from the Tanks tab, which replays every year since 1889 unadjusted.` })}</details>`;
+    $('#g-tanks').querySelectorAll('svg.chart').forEach(bindTips);
+  }, 30);
 }
 
 // ================================================================= TANKS (live, via Apps Script)
@@ -608,12 +698,6 @@ async function api(action, payload) {
 }
 function loadCachedTanks() {
   try { const c = JSON.parse(localStorage.getItem('tal-dash') || 'null'); if (c) { T.data = c.data; T.who = c.who; T.at = c.at; T.stale = true; syncOutlookFromTanks(); } } catch (e) {}
-}
-function syncOutlookFromTanks() {
-  if (!T.data) return;
-  if (!outlook.touched) { outlook.start = Math.round(T.data.now.tank / 500) * 500; outlook.rate = Math.round(T.data.totals.recentRate / 10) * 10; }
-  CONFIG.capacity = T.data.settings.capacityLitres; CONFIG.reserve = T.data.settings.reserveLitres;
-  if (rendered.outlook) { rendered.outlook = false; if (!$('#view-outlook').hidden) { renderOutlook(); rendered.outlook = true; } }
 }
 
 const fmtWhen = local => { const p = local.split(/[- :]/).map(Number), d = new Date(p[0], p[1] - 1, p[2], p[3], p[4]); return d.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' }) + ', ' + d.toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }).replace(' ', ''); };
@@ -706,10 +790,11 @@ function renderTanks() {
         <p class="small" style="margin-top:8px">${nf.format(now.tank)} L in the tanks, less the ${(Math.round(s.reserveLitres / 1000) + 'k')} the pump can't reach.</p></div>
       </div>
       <h3 class="answer" style="margin-top:12px">${verdict}</h3>
-      <p class="explain">With no rain at all you'd have about <b>${daysNoRain} days</b> at your recent ${nf.format(t.recentRate)} L a day. In a typical year the tanks bottom out around <b>${MON[o.lowMonth]}</b> at about ${nf.format(Math.round(o.low / 1000) * 1000)} L, and in the worst 1 in 10 years about ${nf.format(Math.round(o.low10 / 1000) * 1000)} L.</p>
+      <p class="explain">In a typical year the tanks bottom out around <b>${MON[o.lowMonth]}</b> at about ${nf.format(Math.round(o.low / 1000) * 1000)} L. With no rain at all, ${daysNoRain} days at your recent ${nf.format(t.recentRate)} L a day.</p>
       <p class="tiny muted">Last reading ${fmtWhen(d.lastReading.local)} · ${nf.format(d.lastReading.meter)} L on the meter${sinceRead > 0.5 ? ' · today is estimated' : ''}</p>
     </div>
     <button class="btn big-btn" id="t-log">+ Log a meter reading</button>
+    ${aheadCard(now.tank)}
     ${card({
       q: 'Are we using too much?',
       headline: o.safe ? (t.recentRate > o.safe + 15 ? `A little. You're using ${nf.format(t.recentRate)} L a day; the rain reliably supports about ${o.safe}.` : `No. ${nf.format(t.recentRate)} L a day is within what the roof can reliably supply (about ${o.safe}).`) : `Lately ${nf.format(t.recentRate)} L a day.`,
@@ -737,6 +822,8 @@ function renderTanks() {
     </div>
     <p class="note">Your readings live in your private Google Sheet. <a href="https://docs.google.com/spreadsheets/d/1-jxUCdUG4zsni5m9vYbpUEs54PbtBwCKq36Yb_zdKgE/edit" target="_blank" rel="noopener">Open the sheet</a></p>`;
   el.querySelectorAll('svg.chart').forEach(bindTips);
+  drawAhead(now.tank);
+  $('#ah-rate').oninput = e => { outlook.rate = +e.target.value; outlook.touched = true; drawAhead(now.tank); };
   $('#t-log').onclick = () => openForm('reading');
   $('#t-rain').onclick = () => openForm('rain');
   $('#t-check').onclick = () => openForm('check');
@@ -845,11 +932,11 @@ function renderRain() {
   const el = $('#view-rain');
   el.innerHTML = `
     <div class="view-head"><h1>Rain</h1><span class="sub">Norton Summit since 1889</span></div>
-    <div class="seg" role="tablist">${[['year', 'This year'], ['history', 'Patterns'], ['drivers', 'Drivers'], ['explore', 'Explore']].map(([k, l]) => `<button role="tab" data-sub="${k}" aria-selected="${rainState.sub === k}">${l}</button>`).join('')}</div>
+    <div class="seg" role="tablist">${[['year', 'This year'], ['history', 'Patterns'], ['explore', 'Explore']].map(([k, l]) => `<button role="tab" data-sub="${k}" aria-selected="${rainState.sub === k}">${l}</button>`).join('')}</div>
     <div id="rain-body"></div>`;
   el.querySelectorAll('[data-sub]').forEach(b => b.onclick = () => { rainState.sub = b.dataset.sub; renderRain(); scrollTo(0, 0); });
   const body = $('#rain-body');
-  ({ year: renderThisYear, history: renderHistory, drivers: renderDrivers, explore: renderExplore })[rainState.sub](body);
+  ({ year: renderThisYear, history: renderHistory, explore: renderExplore })[rainState.sub](body);
 }
 
 // ================================================================= tabs + boot
@@ -857,7 +944,7 @@ const rendered = {};
 function show(tab) {
   document.querySelectorAll('.tabbar [data-tab]').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === tab));
   document.querySelectorAll('.view').forEach(v => v.hidden = v.id !== 'view-' + tab);
-  if (!rendered[tab] && D) { ({ tanks: renderTanks, rain: renderRain, outlook: renderOutlook })[tab](); rendered[tab] = true; }
+  if (!rendered[tab] && D) { ({ tanks: renderTanks, rain: renderRain, genie: renderGenie })[tab](); rendered[tab] = true; }
   hideTip(); scrollTo(0, 0);
   if (tab === 'tanks' && keyOf() && (!T.at || Date.now() - T.at > 60000)) refreshTanks(true);
   try { localStorage.setItem('tal-tab', tab); } catch (e) {}
@@ -874,6 +961,6 @@ document.querySelectorAll('.tabbar [data-tab]').forEach(b => b.onclick = () => s
   D = deriveData(raw);
   loadCachedTanks();
   document.addEventListener('visibilitychange', () => { if (!document.hidden && keyOf()) refreshTanks(true); });
-  show(['tanks', 'rain', 'outlook'].includes(initial) ? initial : 'rain');
+  show(['tanks', 'rain', 'genie'].includes(initial) ? initial : 'rain');
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
