@@ -1,6 +1,6 @@
 // Offline support: app shell cached; data fetched fresh when online, cached copy when not.
-const CACHE = 'tal-v8';
-const SHELL = ['./', 'index.html', 'style.css?v=8', 'app.js?v=8', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png'];
+const CACHE = 'tal-v9';
+const SHELL = ['./', 'index.html', 'style.css?v=9', 'app.js?v=9', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k))))); self.clients.claim(); });
 self.addEventListener('fetch', e => {

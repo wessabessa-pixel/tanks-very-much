@@ -9,7 +9,8 @@ const CONFIG = {
   efficiency: 0.85,
   startTank: 103575,     // estimate at last reading (26 Nov 2026); replaced by live data once connected
   startTankDate: '2026-11-26',
-  dailyUse: 470,
+  dailyUse: 470,        // spring–summer (irrigation season) use, L/day
+  winterUse: 300,       // winter use with the irrigation off; overridden by Settings.winterDailyLitres
   trackerUrl: 'https://script.google.com/macros/s/AKfycbyTfVz7nKoa1Fd7MWiaiA6AyNVx_Ho5-lSXlxIt_2n_HwTHAu5UWD5gOtRBtH5_zsUErQ/exec'
 };
 const LPM = CONFIG.roofM2 * CONFIG.efficiency; // litres per mm of rain
@@ -402,6 +403,23 @@ function renderExplore(el) {
 
 // ================================================================= TANKS: what's ahead (replaces the Outlook tab)
 const outlook = { rate: CONFIG.dailyUse, touched: false };
+// Seasonal use: irrigation runs through spring and summer, a little in autumn, and is off in winter.
+// rate = the spring–summer L/day; winter uses the Settings figure; autumn sits halfway between.
+const USE_W = [1, 1, 0.5, 0.5, 0.5, 0, 0, 0, 1, 1, 1, 1];
+const winterUse = () => { const v = Number(T.data && T.data.settings && T.data.settings.winterDailyLitres); return v > 0 ? v : CONFIG.winterUse; };
+function useByMonth(rate) { const w = Math.min(winterUse(), rate); return USE_W.map(k => w + k * (rate - w)); }
+function seasonRate(recent, month) { // spring–summer rate implied by a rate measured in a given month
+  const w = Math.min(winterUse(), recent), k = USE_W[month];
+  return k ? Math.round((w + (recent - w) / k) / 10) * 10 : Math.max(Math.round(recent / 10) * 10, CONFIG.dailyUse);
+}
+const MCACHE = {};
+function monthsFrom(startMs, days) { // month (0–11) of each day from a start date
+  const key = Math.floor(startMs / DAY) + ':' + days;
+  if (!MCACHE[key]) { const a = new Uint8Array(days); for (let i = 0; i < days; i++) a[i] = new Date(startMs + i * DAY).getMonth(); MCACHE[key] = a; }
+  return MCACHE[key];
+}
+const todayMonths = days => monthsFrom(new Date(new Date().toDateString()).getTime(), days);
+const WATER_YEAR_MONTHS = (() => { const a = new Uint8Array(365 * 3); for (let i = 0; i < a.length; i++) a[i] = new Date(Date.UTC(2024, 11, 1) + (i % 365) * DAY).getUTCMonth(); return a; })();
 function histories(subset) {
   const today = new Date(), md = [today.getMonth(), today.getDate()], days = 365 * 3, out = [];
   for (const y of D.years) {
@@ -412,10 +430,11 @@ function histories(subset) {
   }
   return out;
 }
-function simulate(rain, rate, start, days) {
-  let b = start, min = b, minDay = 0, hit = null; const traj = new Float32Array(days);
+function simulate(rain, rate, start, days, months) {
+  let b = start, min = b, minDay = 0, hit = null; const traj = new Float32Array(days), prof = useByMonth(rate);
+  months = months || todayMonths(days);
   for (let i = 0; i < days; i++) {
-    b = Math.min(CONFIG.capacity, b - rate + rain[i] * LPM);
+    b = Math.min(CONFIG.capacity, b - prof[months[i]] + rain[i] * LPM);
     if (b < min) { min = b; minDay = i; }
     if (hit === null && b <= CONFIG.reserve) hit = i;
     traj[i] = Math.max(b, 0);
@@ -425,7 +444,7 @@ function simulate(rain, rate, start, days) {
 function reliability(hs, rate, start, days) { return hs.filter(h => simulate(h.rain, rate, start, Math.min(days, h.rain.length)).hit === null).length / hs.length; }
 function syncOutlookFromTanks() {
   if (!T.data) return;
-  if (!outlook.touched) outlook.rate = Math.round(T.data.totals.recentRate / 10) * 10;
+  if (!outlook.touched) outlook.rate = seasonRate(T.data.totals.recentRate, new Date().getMonth());
   CONFIG.capacity = T.data.settings.capacityLitres; CONFIG.reserve = T.data.settings.reserveLitres;
 }
 
@@ -433,7 +452,7 @@ function aheadCard(start) {
   return `<div class="card" id="t-ahead">
     <div class="q">What's ahead for the tanks?</div>
     <div id="ah-answer"></div>
-    <div class="slider-row" style="margin:6px 0 4px"><label for="ah-rate">If we use</label><input id="ah-rate" type="range" min="250" max="800" step="10" value="${outlook.rate}"><output id="ah-out"></output></div>
+    <div class="slider-row" style="margin:6px 0 4px"><label for="ah-rate">Spring–summer use</label><input id="ah-rate" type="range" min="250" max="1000" step="10" value="${outlook.rate}"><output id="ah-out"></output></div>
     <div class="chart-wrap" id="ah-chart"></div>
     <div class="legend"><span><i class="line" style="background:var(--water)"></i>Typical year</span><span><i style="background:var(--band)"></i>8 in 10 years</span><span><i style="background:rgba(194,65,12,.25)"></i>Pump can't reach</span></div>
     <details><summary>See the odds</summary><div id="ah-table"></div></details>
@@ -447,10 +466,10 @@ function drawAhead(start) {
   const c12 = within(365), c36 = within(1095);
   const lows = sims.map(s => Math.min(...s.traj.slice(0, 365)));
   const worst = sims.slice().sort((a, b) => a.min - b.min)[0];
-  const safe = (() => { let lo = 200, hi = 800; for (let i = 0; i < 9; i++) { const mid = (lo + hi) / 2; if (reliability(hs, mid, start, days) >= 0.95) lo = mid; else hi = mid; } return Math.floor(lo / 10) * 10; })();
+  const safe = (() => { let lo = 200, hi = 1100; for (let i = 0; i < 9; i++) { const mid = (lo + hi) / 2; if (reliability(hs, mid, start, days) >= 0.95) lo = mid; else hi = mid; } return Math.floor(lo / 10) * 10; })();
   const head = c12 === 0 && c36 / n <= 0.05 ? 'No trouble in sight at this rate.' : c12 === 0 ? 'Fine for the next year; the risk builds after that.' : c12 / n <= 0.1 ? 'Mostly fine, with a small chance of running low within a year.' : 'A real chance of running low within a year at this rate.';
   $('#ah-answer').innerHTML = `<h3 class="answer">${head}</h3>
-    <p class="explain">We replayed every year of rain since 1889 from today. At ${nf.format(rate)} L a day the tanks ran low ${c12 === 0 ? 'in none of them within a year' : `in ${c12} of ${n} within a year`}${c36 === 0 ? '' : `, and about 1 in ${Math.max(1, Math.round(n / c36))} within three years`}. Drag to try other amounts. <b>${safe} L a day</b> is safe in 19 of 20.</p>`;
+    <p class="explain">We replayed every year of rain since 1889 from today, using ${nf.format(rate)} L a day in spring and summer, ${nf.format(Math.min(winterUse(), rate))} in winter and halfway between in autumn. The tanks ran low ${c12 === 0 ? 'in none of them within a year' : `in ${c12} of ${n} within a year`}${c36 === 0 ? '' : `, and about 1 in ${Math.max(1, Math.round(n / c36))} within three years`}. Drag to try other amounts. <b>${safe} L a day</b> through spring and summer is safe in 19 of 20.</p>`;
   const W = 340, H = 190, pl = 34, pr = 8, pt = 8, pb = 22;
   const X = i => pl + i / (days - 1) * (W - pl - pr), Y = v => pt + (1 - v / CONFIG.capacity) * (H - pt - pb);
   const idx = []; for (let i = 0; i < days; i += 7) idx.push(i); idx.push(days - 1);
@@ -474,7 +493,7 @@ function drawAhead(start) {
     ['Typical low point in the next year', nf.format(Math.round(median(lows) / 1000) * 1000) + ' L'],
     ['Low point in the worst 1 in 10 years', nf.format(Math.round(quantile(lows, 0.1) / 1000) * 1000) + ' L'],
     ['Worst rain on record for this start date', `${worst.y}–${String(worst.y + 3).slice(2)}`],
-    ['Safe steady use (19 in 20 runs)', safe + ' L/day']
+    ['Safe spring–summer use (19 in 20 runs)', safe + ' L/day'], ['Winter use assumed', nf.format(Math.min(winterUse(), rate)) + ' L/day']
   ], { note: `Every year since 1889 replayed from today's date: ${nf.format(CONFIG.capacity)} L tanks, ${nf.format(LPM)} L caught per mm, overflow when full. Odds, not a forecast; the Genie tab shows how a drying climate shifts them.` });
 }
 
@@ -548,8 +567,8 @@ function safeUse(model, centreYear, startTank) { // steady L/day that stays clea
     }
     runs.push(seq);
   });
-  const ok = rate => runs.filter(seq => simulate(seq, rate, startTank, seq.length).hit === null).length / runs.length;
-  let lo = 200, hi = 800;
+  const ok = rate => runs.filter(seq => simulate(seq, rate, startTank, seq.length, WATER_YEAR_MONTHS).hit === null).length / runs.length;
+  let lo = 200, hi = 1100;
   for (let i = 0; i < 9; i++) { const mid = (lo + hi) / 2; if (ok(mid) >= 0.95) lo = mid; else hi = mid; }
   return Math.floor(lo / 10) * 10;
 }
@@ -623,21 +642,21 @@ function renderGenie() {
   const sl = $('#g-year'); sl.oninput = () => { sl.nextElementSibling.textContent = sl.value; }; sl.onchange = () => { G.year = +sl.value; renderGenie(); };
   // tanks by decade, computed after paint
   setTimeout(() => {
-    const key = 'tanks-' + G.scen + (T.data ? '-live' : '');
+    const key = 'tanks-' + G.scen + (T.data ? '-live' : '') + '-w' + winterUse();
     if (!G.cache[key]) {
       const start = T.data ? Math.max(60000, T.data.now.tank) : 110000, decades = [D.endYear + 1, 2035, 2045, 2055, 2065, 2075].filter(y => y <= m.Y1);
       G.cache[key] = decades.map(y => ({ y, safe: safeUse(m, y, start) }));
     }
-    const rows = G.cache[key], use = T.data ? Math.round(T.data.totals.recentRate) : CONFIG.dailyUse;
+    const rows = G.cache[key], use = T.data ? seasonRate(T.data.totals.recentRate, new Date().getMonth()) : CONFIG.dailyUse;
     const nowSafe = rows[0].safe, atY = rows.slice(1).find(r => Y >= r.y - 5 && Y < r.y + 5) || rows.reduce((best, r) => Math.abs(r.y - Y) < Math.abs(best.y - Y) ? r : best, rows[0]);
     const drop = nowSafe - atY.safe;
     const decLabel = r => r.y === rows[0].y ? 'next few years' : `the ${r.y - 5}s`;
     $('#g-tanks').innerHTML = `
       <div class="q">Will our tanks still cope?</div>
-      <h3 class="answer">${drop <= 15 ? 'Yes, with little change to how much you can use.' : `Yes, if daily use comes down by about ${Math.round(drop / 10) * 10} L by ${decLabel(atY)}.`}</h3>
-      <div class="pair"><div><span>Safe now</span><b>${nowSafe}</b><span>L a day</span></div><div class="arrow">→</div><div><span>In ${decLabel(atY)}</span><b>${atY.safe}</b><span>L a day</span></div></div>
-      <p class="explain">You're using about ${nf.format(use)} L a day. ${drop <= 15 ? 'It barely moves because the tanks overflow most winters, so a drier climate mostly trims water that would have spilled anyway.' : 'More roof or another tank would push this back up.'}</p>
-      <details><summary>Safe daily use by decade</summary>${table(['Decade', 'Safe L/day', 'Change'], rows.map((r, i) => ({ hl: r.y === atY.y, cells: [i ? `${r.y - 5}s` : 'Next few years', r.safe, i ? pctTxt((r.safe / nowSafe - 1) * 100) : '–'] })), { note: `Safe = staying above what the pump can reach in 19 of 20 three-year runs, with your ${nf.format(CONFIG.capacity)} L tanks and ${CONFIG.roofM2} m² roof. Uses years since 1950 adjusted to each decade's climate, so it can differ a little from the Tanks tab.` })}</details>`;
+      <h3 class="answer">${drop <= 25 ? 'Yes, with little change to how much you can use.' : `Yes, if daily use comes down by about ${Math.round(drop / 10) * 10} L by ${decLabel(atY)}.`}</h3>
+      <div class="pair"><div><span>Safe now</span><b>${nowSafe}</b><span>L a day, spring–summer</span></div><div class="arrow">→</div><div><span>In ${decLabel(atY)}</span><b>${atY.safe}</b><span>L a day, spring–summer</span></div></div>
+      <p class="explain">You're using about ${nf.format(use)} L a day in spring and summer, and about ${nf.format(winterUse())} in winter. ${drop <= 25 ? 'It barely moves because the tanks overflow most winters, so a drier climate mostly trims water that would have spilled anyway.' : 'More roof or another tank would push this back up.'}</p>
+      <details><summary>Safe daily use by decade</summary>${table(['Decade', 'Safe L/day', 'Change'], rows.map((r, i) => ({ hl: r.y === atY.y, cells: [i ? `${r.y - 5}s` : 'Next few years', r.safe, i ? pctTxt((r.safe / nowSafe - 1) * 100) : '–'] })), { note: `Safe = the spring–summer daily use (winter ${nf.format(winterUse())} L, autumn halfway) that stays above what the pump can reach in 19 of 20 three-year runs, with your ${nf.format(CONFIG.capacity)} L tanks and ${CONFIG.roofM2} m² roof. Uses years since 1950 adjusted to each decade's climate, so it can differ a little from the Tanks tab.` })}</details>`;
     $('#g-tanks').querySelectorAll('svg.chart').forEach(bindTips);
   }, 30);
 }
@@ -689,7 +708,7 @@ function tankOutlook(start, rate) { // one-year replay through all years, for th
   const hs = histories('all'), sims = hs.map(h => simulate(h.rain, rate, start, 365));
   const lows = sims.map(s => s.min), lowDays = sims.map(s => s.minDay);
   const c = {}; lowDays.forEach(d => { const m = new Date(Date.now() + d * DAY).getMonth(); c[m] = (c[m] || 0) + 1; });
-  const rates = []; for (let r = 300; r <= 700; r += 10) rates.push(r);
+  const rates = []; for (let r = 300; r <= 1000; r += 10) rates.push(r);
   const hs3 = histories('all'), safe = rates.filter(r => reliability(hs3, r, start, 365 * 3) >= 0.95).pop();
   return { low: median(lows), low10: quantile(lows, 0.1), lowMonth: +Object.entries(c).sort((a, b) => b[1] - a[1])[0][0], hit12: sims.filter(s => s.hit !== null).length, n: sims.length, safe };
 }
@@ -723,8 +742,8 @@ function renderTanks() {
   }
   const d = T.data, s = d.settings, t = d.totals, now = d.now;
   const usable = Math.max(0, now.tank - s.reserveLitres);
-  const o = tankOutlook(now.tank, t.recentRate);
-  const daysNoRain = Math.floor(usable / t.recentRate);
+  const R = seasonRate(t.recentRate, new Date().getMonth()), o = tankOutlook(now.tank, R);
+  const daysNoRain = (() => { const ms = todayMonths(1500), prof = useByMonth(R); let b = usable, i = 0; while (b > 0 && i < 1500) b -= prof[ms[i++]]; return i; })();
   const sinceRead = now.daysSinceReading;
   const verdict = o.low > 40000 ? 'Plenty to get through summer.' : o.low > 20000 ? 'Enough for summer, but it will get tight by autumn.' : 'Tight. Worth cutting back now.';
   const alerts = [];
@@ -750,16 +769,16 @@ function renderTanks() {
         <p class="small" style="margin-top:8px">${nf.format(now.tank)} L in the tanks, less the ${(Math.round(s.reserveLitres / 1000) + 'k')} the pump can't reach.</p></div>
       </div>
       <h3 class="answer" style="margin-top:12px">${verdict}</h3>
-      <p class="explain">In a typical year the tanks bottom out around <b>${MON[o.lowMonth]}</b> at about ${nf.format(Math.round(o.low / 1000) * 1000)} L. With no rain at all, it would last about ${daysNoRain} days at your recent ${nf.format(t.recentRate)} L a day.</p>
+      <p class="explain">In a typical year the tanks bottom out around <b>${MON[o.lowMonth]}</b> at about ${nf.format(Math.round(o.low / 1000) * 1000)} L. With no rain at all, it would last about ${daysNoRain} days, with winter use dropping to about ${nf.format(winterUse())} L a day.</p>
       <p class="tiny muted">Last reading ${fmtWhen(d.lastReading.local)} · ${nf.format(d.lastReading.meter)} L on the meter${sinceRead > 0.5 ? ' · today is estimated' : ''}</p>
     </div>
     <button class="btn big-btn" id="t-log">+ Log a meter reading</button>
     ${aheadCard(now.tank)}
     ${card({
       q: 'Are we using too much?',
-      headline: o.safe ? (t.recentRate > o.safe + 15 ? `A little. The rain reliably supports about ${o.safe} L a day.` : `No. You're within what the roof can reliably supply.`) : `Lately ${nf.format(t.recentRate)} L a day.`,
-      chart: `<div class="stat3"><div><b>${nf.format(t.recentRate)}</b><span>L/day lately</span></div><div><b>${nf.format(t.latestRate)}</b><span>since the last reading</span></div><div><b style="color:var(--good)">${o.safe || '–'}</b><span>L/day is safe</span></div></div>`,
-      explain: `<span class="small">"Safe" means the tanks stay above what the pump can reach in 19 of 20 runs of past weather. ${t.latestRate > t.prevRecentRate * 1.1 ? 'The latest period was higher than usual.' : 'Use has been steady.'}</span>`,
+      headline: o.safe ? (R > o.safe + 15 ? `A little. Through spring and summer the rain reliably supports about ${o.safe} L a day.` : `No. You're within what the roof can reliably supply.`) : `Lately ${nf.format(t.recentRate)} L a day.`,
+      chart: `<div class="stat3"><div><b>${nf.format(t.recentRate)}</b><span>L/day lately</span></div><div><b>${nf.format(winterUse())}</b><span>L/day in winter</span></div><div><b style="color:var(--good)">${o.safe || '–'}</b><span>L/day is safe in spring–summer</span></div></div>`,
+      explain: `<span class="small">Irrigation makes spring and summer the thirsty months. Winter is about ${nf.format(winterUse())} L a day, autumn in between. "Safe" keeps the tanks above what the pump can reach in 19 of 20 runs of past weather. ${t.latestRate > t.prevRecentRate * 1.1 ? 'The latest period was higher than usual.' : 'Use has been steady.'} You can change the winter figure in the Settings tab of your sheet.</span>`,
       numbers: `${table(['Reading', 'Meter L', 'L/day', ''], d.readings.slice().reverse().map((r, i, arr) => {
         const ivv = d.intervals.find(x => x.to === r.local);
         return [`${fmtWhen(r.local)}<br><span class="tiny muted">${esc(r.by || '')}${r.note ? ' · ' + esc(r.note) : ''}</span>`, nf.format(r.meter), ivv ? nf.format(ivv.perDay) : '–', i === arr.length - 1 ? '' : `<button class="x" data-del-reading="${r.local}" aria-label="Delete reading">✕</button>`];
