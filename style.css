@@ -164,3 +164,27 @@ details[open] summary::after { transform: rotate(90deg); }
 .pair b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
 .pair span { font-size: 12.5px; color: var(--ink-2); }
 .pair .arrow { flex: none; background: none; padding: 0; color: var(--ink-3); font-size: 20px; }
+
+/* My tanks */
+.hero-num { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 12px; }
+.hero-num .big { font-size: 44px; line-height: 1.05; }
+.tk-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.tk-tile { display: flex; align-items: center; gap: 8px; text-align: left; background: var(--bg); border: 0; border-radius: 14px; padding: 8px 8px 8px 4px; color: var(--ink); font: inherit; cursor: pointer; min-width: 0; }
+.tk-tile:active { transform: scale(.98); }
+.tk-tile .mtank { width: 52px; flex: none; }
+.tk-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tk-txt b { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-txt > span { font-size: 11.5px; color: var(--ink-2); }
+.tk-txt .tag { align-self: flex-start; margin-top: 2px; font-size: 10.5px; }
+.tk-tile.add { border: 1.5px dashed var(--ink-3); background: none; justify-content: flex-start; padding-left: 12px; }
+.tk-tile.add .plus { font-size: 28px; color: var(--water); width: 34px; text-align: center; }
+.fill-row { display: flex; align-items: center; gap: 12px; }
+.fill-row input { flex: 1; }
+.fill-row output { min-width: 112px; text-align: right; font-weight: 650; font-variant-numeric: tabular-nums; }
+.chk { display: flex; gap: 8px; align-items: center; font-size: 14px; margin-top: 10px; color: var(--ink-2); }
+details.more { margin-top: 12px; }
+details.more summary { color: var(--water); font-weight: 600; font-size: 14px; }
+.ghost.danger { color: var(--warn); width: 100%; }
+.linkbtn { background: none; border: 0; padding: 0; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; }
+.warn-txt { color: var(--warn); }
+select.inp { appearance: auto; }

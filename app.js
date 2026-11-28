@@ -443,9 +443,10 @@ function simulate(rain, rate, start, days, months) {
 }
 function reliability(hs, rate, start, days) { return hs.filter(h => simulate(h.rain, rate, start, Math.min(days, h.rain.length)).hit === null).length / hs.length; }
 function syncOutlookFromTanks() {
-  if (!T.data) return;
+  if (!T.data || T.data.empty || !T.data.totals) return;
   if (!outlook.touched) outlook.rate = seasonRate(T.data.totals.recentRate, new Date().getMonth());
-  CONFIG.capacity = T.data.settings.capacityLitres; CONFIG.reserve = T.data.settings.reserveLitres;
+  const TMs = T.data.tanks && T.data.tanks.length ? tankModel(T.data) : null;
+  CONFIG.capacity = TMs && TMs.sysCap ? TMs.sysCap : T.data.settings.capacityLitres; CONFIG.reserve = T.data.settings.reserveLitres || 0;
 }
 
 function aheadCard(start) {
@@ -704,6 +705,190 @@ function tankSvg(level, s) {
   </svg>`;
 }
 
+// ================================================================= MY TANKS: an estimate for every tank
+// Each tank is tracked on its own: rain from its roof, overflow from the tank it sits below, metered use from the
+// meter tank, any daily use set for unmetered tanks, water moved between tanks, and the owner's own estimates.
+const overflowSrc = t => { const m = /^overflow from (.+)$/i.exec(String(t.fedFrom || '').trim()); return m ? m[1].trim() : null; };
+const isRoofFed = t => /^roof/i.test(String(t.fedFrom || '').trim());
+function tankList(d) {
+  if (d.tanks && d.tanks.length) return d.tanks.map(t => Object.assign({}, t, { capacity: Number(t.capacity) || 0 }));
+  if (d.empty) return [];
+  return [{ name: 'Main tanks', capacity: d.settings.capacityLitres, fedFrom: 'Roof', roofM2: d.settings.roofAreaM2, meter: true }];
+}
+function tankModel(d) {
+  const tanks = tankList(d), byName = {}; tanks.forEach(t => byName[t.name] = t);
+  const eff = Number(d.settings.captureEfficiency) || 0.85, meterT = tanks.find(t => t.meter) || null;
+  const sys = new Set(meterT ? [meterT.name] : []); // the supply system: the meter tank and every tank joined to it
+  for (let grew = true; grew;) {
+    grew = false;
+    tanks.forEach(t => {
+      if (sys.has(t.name)) return;
+      const o = overflowSrc(t), joined = (o && sys.has(o)) || (t.topUpFrom && sys.has(t.topUpFrom)) || tanks.some(u => sys.has(u.name) && (u.topUpFrom === t.name || overflowSrc(u) === t.name));
+      if (joined) { sys.add(t.name); grew = true; }
+    });
+  }
+  const lpm = t => (Number(t.roofM2) || 0) * eff || (t.meter && isRoofFed(t) ? d.litresPerMm || 0 : 0);
+  const lvl = {}; tanks.forEach(t => lvl[t.name] = null);
+  const nowDay = dayNum(d.now.local), baseDay = d.empty ? null : d.settings.baselineDate ? dayNum(d.settings.baselineDate) : d.readings && d.readings[0] ? d.readings[0].day : null;
+  const ev = [];
+  if (baseDay != null) ev.push({ day: baseDay, k: 'start' });
+  (d.rain || []).forEach(r => ev.push({ day: dayNum(r.date) + 1, k: 'rain', mm: Number(r.mm) || 0 }));
+  (d.transfers || []).forEach(x => ev.push({ day: dayNum(x.local), k: 'move', x }));
+  (d.tankChecks || []).forEach(c => ev.push({ day: dayNum(c.local), k: 'set', c }));
+  (d.checks || []).forEach(c => ev.push({ day: c.day, k: 'setAll', c }));
+  ev.push({ day: nowDay, k: 'now' });
+  const order = { start: 0, set: 1, setAll: 1, move: 2, rain: 3, now: 4 };
+  ev.sort((a, b) => a.day - b.day || order[a.k] - order[b.k]);
+  const iv = d.intervals || [], lastDay = d.lastReading ? d.lastReading.day : null, recent = d.totals ? d.totals.recentRate || 0 : 0;
+  const metered = (a, b) => { // litres through the meter between two moments
+    let L = 0;
+    iv.forEach(x => { const lo = Math.max(a, x.fromDay), hi = Math.min(b, x.toDay); if (hi > lo && x.perDay) L += (hi - lo) * x.perDay; });
+    if (lastDay != null && b > lastDay) L += (b - Math.max(a, lastDay)) * recent;
+    return L;
+  };
+  let spilled = 0;
+  const pour = (name, L) => { // add water; what doesn't fit runs on to the tank its overflow feeds
+    for (let n = name, g = 0; n && L > 0 && g < 12; g++) {
+      if (lvl[n] == null) return;
+      const put = Math.min(byName[n].capacity - lvl[n], L); lvl[n] += put; L -= put;
+      const next = tanks.find(o => overflowSrc(o) === n); n = next ? next.name : null;
+    }
+    spilled += Math.max(0, L);
+  };
+  let prev = null;
+  ev.forEach(e => {
+    if (prev != null && e.day > prev) {
+      if (meterT && lvl[meterT.name] != null) lvl[meterT.name] = Math.max(0, lvl[meterT.name] - metered(prev, e.day));
+      tanks.forEach(t => { if (!t.meter && Number(t.usePerDay) > 0 && lvl[t.name] != null) lvl[t.name] = Math.max(0, lvl[t.name] - t.usePerDay * (e.day - prev)); });
+    }
+    if (e.k === 'start') tanks.forEach(t => { if (sys.has(t.name)) lvl[t.name] = t.capacity; });
+    else if (e.k === 'rain') tanks.forEach(t => { if (isRoofFed(t)) pour(t.name, e.mm * lpm(t)); });
+    else if (e.k === 'move') { const x = e.x, L = Math.min(Number(x.litres) || 0, lvl[x.from] != null ? lvl[x.from] : Infinity); if (lvl[x.from] != null) lvl[x.from] -= L; if (lvl[x.to] != null) pour(x.to, L); }
+    else if (e.k === 'set' && byName[e.c.tank]) lvl[e.c.tank] = Math.max(0, Math.min(byName[e.c.tank].capacity, e.c.litres));
+    else if (e.k === 'setAll') { let L = e.c.litres; [...sys].sort((a, b) => (byName[b].meter ? 1 : 0) - (byName[a].meter ? 1 : 0)).forEach(n => { const put = Math.min(byName[n].capacity, L); lvl[n] = put; L -= put; }); }
+    prev = prev == null ? e.day : Math.max(prev, e.day);
+  });
+  const lastSet = {}; (d.tankChecks || []).forEach(c => lastSet[c.tank] = c);
+  const out = tanks.map(t => Object.assign(t, { level: lvl[t.name] == null ? null : Math.round(lvl[t.name]), inSystem: sys.has(t.name), lpm: lpm(t), lastSet: lastSet[t.name] || null }));
+  const sysT = out.filter(t => t.inSystem), sysKnown = sysT.length > 0 && sysT.every(t => t.level != null);
+  return { tanks: out, byName, meterT, sysT, sysKnown, sysTotal: sum(sysT.map(t => t.level || 0)), sysCap: sum(sysT.map(t => t.capacity)), knownTotal: sum(out.filter(t => t.level != null).map(t => t.level)), capTotal: sum(out.map(t => t.capacity)) };
+}
+function flowText(tanks) {
+  const bits = [];
+  tanks.forEach(t => { if (isRoofFed(t)) bits.push(`Rain fills <b>${esc(t.name)}</b>${!t.lpm ? ' <span class="warn-txt">(add its roof area)</span>' : ''}`); });
+  tanks.forEach(t => { const o = overflowSrc(t); if (o) bits.push(`${esc(o)} overflows into <b>${esc(t.name)}</b>`); });
+  tanks.forEach(t => { if (t.topUpFrom) bits.push(`<b>${esc(t.topUpFrom)}</b> tops up ${esc(t.name)}${t.lowMark ? ` when it's below ${nf.format(t.lowMark / 1000)}k` : ''}`); });
+  return bits.join(' · ');
+}
+function miniTank(t, i) {
+  const W = 64, H = 78, x = 6, y = 8, w = 52, h = 64, known = t.level != null, f = known ? Math.max(0, Math.min(1, t.level / t.capacity)) : 0, wy = y + h * (1 - f);
+  const lm = t.lowMark ? y + h * (1 - Math.min(1, t.lowMark / t.capacity)) : null;
+  return `<svg viewBox="0 0 ${W} ${H}" class="mtank" aria-hidden="true"><defs><clipPath id="mt${i}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8"/></clipPath></defs>
+    <g clip-path="url(#mt${i})"><rect x="${x}" y="${y}" width="${w}" height="${h}" fill="var(--grid)"/>${known ? `<path d="M${x} ${wy} q ${w / 4} -3 ${w / 2} 0 t ${w / 2} 0 V ${y + h} H ${x} Z" fill="${t.low ? 'var(--warm)' : 'var(--water)'}"/>` : ''}</g>
+    ${lm ? `<line x1="${x}" x2="${x + w}" y1="${lm}" y2="${lm}" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="3 2"/>` : ''}
+    <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8" fill="none" stroke="var(--ink-3)" stroke-width="1.5"/><rect x="${x + w / 2 - 9}" y="${y - 6}" width="18" height="6" rx="2" fill="var(--ink-3)"/>
+    <text x="${x + w / 2}" y="${y + h / 2 + 5}" text-anchor="middle" style="font-size:14px;font-weight:700;fill:${known && f > 0.45 ? '#fff' : 'var(--ink)'}">${known ? Math.round(f * 100) + '%' : '?'}</text></svg>`;
+}
+function myTanksCard(TM, d, useToday) {
+  const tiles = TM.tanks.map((t, i) => {
+    const known = t.level != null;
+    let tag = '', sub = known ? `${nf.format(Math.round(t.level / 100) * 100)} of ${nf.format(t.capacity)} L` : `${nf.format(t.capacity)} L · tap to set`;
+    if (known && t.low) tag = `<span class="tag dry">Top up${t.topUpFrom ? ' from ' + esc(t.topUpFrom) : ''}</span>`;
+    else if (known && t.daysToLow != null && t.daysToLow < 60) tag = `<span class="tag">Top up in ~${Math.max(1, Math.round(t.daysToLow))} days</span>`;
+    else if (t.meter) tag = '<span class="tag">Water meter</span>';
+    return `<button class="tk-tile" data-tank="${esc(t.name)}">${miniTank(t, i)}<span class="tk-txt"><b>${esc(t.name)}</b><span>${sub}</span>${tag}</span></button>`;
+  }).join('');
+  return `<div class="tk-grid">${tiles}<button class="tk-tile add" id="tk-add"><span class="plus">+</span><span class="tk-txt"><b>Add a tank</b><span>Size and how full</span></span></button></div>
+    ${TM.tanks.length ? `<p class="tiny muted" style="margin:8px 2px 0">${flowText(TM.tanks)}${flowText(TM.tanks) ? '. ' : ''}Tap a tank to change its size or say how full it is.</p>` : ''}`;
+}
+function annotateTanks(TM, R) {
+  const m = new Date().getMonth(), use = R ? useByMonth(R)[m] : 0;
+  TM.tanks.forEach(t => {
+    t.low = t.level != null && t.lowMark != null && t.lowMark > 0 && t.level <= t.lowMark;
+    const draw = t.meter ? use : Number(t.usePerDay) || 0;
+    t.daysToLow = t.level != null && t.lowMark && draw > 0 && !t.low ? (t.level - t.lowMark) / draw : null;
+  });
+}
+
+// ---------------- the tank editor: size and how full first; plumbing tucked away
+function openTankSheet(name) {
+  const d = T.data, TM = tankModel(d), all = tankList(d), t = name ? TM.byName[name] : { name: '', capacity: '', fedFrom: '', level: null };
+  const others = all.filter(o => o.name !== name).map(o => o.name);
+  const fedOpts = [['', 'Filled by hand / not set'], ['Roof', 'A roof']].concat(others.map(n => [`Overflow from ${n}`, `Overflow from ${n}`]));
+  const startPct = t.level != null && t.capacity ? Math.round(t.level / t.capacity * 20) * 5 : 50;
+  const wrap = document.createElement('div'); wrap.className = 'sheet-wrap';
+  wrap.innerHTML = `<div class="scrim"></div><div class="sheet">
+    <h3>${name ? esc(name) : 'Add a tank'}</h3>
+    ${name ? '' : `<label class="fl">Name</label><input id="k-name" class="inp" placeholder="e.g. Shed tanks">`}
+    <label class="fl">Size (litres)</label><input id="k-cap" class="inp" inputmode="numeric" value="${t.capacity || ''}" placeholder="e.g. 20000">
+    <label class="fl">How full is it? <span class="muted">${t.level != null ? `(our estimate: ${Math.round(t.level / t.capacity * 100)}%)` : '(not set yet)'}</span></label>
+    <div class="fill-row"><input id="k-pct" type="range" min="0" max="100" step="5" value="${startPct}"><output id="k-out"></output></div>
+    <label class="chk"><input type="checkbox" id="k-setlevel" ${name && t.level != null ? '' : 'checked'}> Save this as the tank's level now</label>
+    <details class="more"><summary>Where its water comes from</summary>
+      <label class="fl">Fed from</label><select id="k-fed" class="inp">${fedOpts.map(([v, l]) => `<option value="${esc(v)}" ${String(t.fedFrom || '').toLowerCase() === v.toLowerCase() ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+      <div id="k-roofrow"><label class="fl">Roof area feeding it (m²)</label><input id="k-roof" class="inp" inputmode="numeric" value="${t.roofM2 || ''}"></div>
+      <div class="row2"><div><label class="fl">Top up from</label><select id="k-from" class="inp"><option value="">Nothing</option>${others.map(n => `<option ${t.topUpFrom === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></div>
+      <div><label class="fl">…when below (L)</label><input id="k-low" class="inp" inputmode="numeric" value="${t.lowMark || ''}"></div></div>
+      <label class="chk"><input type="checkbox" id="k-meter" ${t.meter ? 'checked' : ''}> The water meter is on this tank</label>
+      <div id="k-userow"><label class="fl">Daily use from this tank, if it has no meter (L)</label><input id="k-use" class="inp" inputmode="numeric" value="${t.usePerDay || ''}" placeholder="0"></div>
+      ${name ? `<button class="ghost danger" id="k-del" style="margin-top:12px">Remove this tank</button>` : ''}
+    </details>
+    <div class="row2" style="margin-top:14px"><button class="ghost" data-close>Cancel</button><button class="btn" id="k-save">Save</button></div></div>`;
+  document.body.appendChild(wrap); requestAnimationFrame(() => wrap.classList.add('open'));
+  const close = () => { wrap.classList.remove('open'); setTimeout(() => wrap.remove(), 250); };
+  wrap.querySelector('.scrim').onclick = close; wrap.querySelector('[data-close]').onclick = close;
+  const $w = s => wrap.querySelector(s), num = s => { const v = String($w(s).value).replace(/[,\s]/g, ''); return v === '' ? null : Number(v); };
+  const showOut = () => { const cap = num('#k-cap') || 0, p = +$w('#k-pct').value; $w('#k-out').textContent = `${p}%${cap ? ' · ' + nf.format(Math.round(cap * p / 100)) + ' L' : ''}`; };
+  const showRows = () => { $w('#k-roofrow').hidden = $w('#k-fed').value !== 'Roof'; $w('#k-userow').hidden = $w('#k-meter').checked; };
+  $w('#k-pct').oninput = () => { $w('#k-setlevel').checked = true; showOut(); }; $w('#k-cap').oninput = showOut;
+  $w('#k-fed').onchange = showRows; $w('#k-meter').onchange = showRows; showOut(); showRows();
+  const persist = async (list, check) => {
+    const save = $w('#k-save'); save.disabled = true; save.textContent = 'Saving…';
+    try {
+      await api('saveTanks', { tanks: list });
+      if (check) await api('addTankCheck', check);
+      close(); renderTanks(); toast('Saved.');
+    } catch (e) { toast(e.message === 'Failed to fetch' ? 'No connection. Try again when you have signal.' : e.message); save.disabled = false; save.textContent = 'Save'; }
+  };
+  if ($w('#k-del')) $w('#k-del').onclick = () => { if (window.confirm(`Remove ${name}? Its past estimates stay in your sheet.`)) persist(all.filter(o => o.name !== name), null); };
+  $w('#k-save').onclick = () => {
+    const nm = name || String($w('#k-name').value).trim(), cap = num('#k-cap');
+    if (!nm) return toast('Give the tank a name.');
+    if (!name && all.some(o => o.name.toLowerCase() === nm.toLowerCase())) return toast('You already have a tank with that name.');
+    if (!(cap > 0)) return toast('Enter the tank size in litres.');
+    const meter = $w('#k-meter').checked;
+    const me = { name: nm, capacity: cap, fedFrom: $w('#k-fed').value, roofM2: $w('#k-fed').value === 'Roof' ? num('#k-roof') : null, lowMark: num('#k-low'), topUpFrom: $w('#k-from').value, usePerDay: meter ? null : num('#k-use'), meter, note: (all.find(o => o.name === name) || {}).note || '' };
+    const strip = o => ({ name: o.name, capacity: o.capacity, fedFrom: o.fedFrom || '', roofM2: o.roofM2, lowMark: o.lowMark, topUpFrom: o.topUpFrom || '', usePerDay: o.usePerDay, meter: meter ? false : !!o.meter, note: o.note || '' });
+    const list = name ? all.map(o => o.name === name ? me : strip(o)) : all.map(strip).concat([me]);
+    if (meter) list.forEach(o => { if (o.name !== nm) o.meter = false; });
+    const check = $w('#k-setlevel').checked ? { tank: nm, litres: Math.round(cap * $w('#k-pct').value / 100), note: 'Estimate' } : null;
+    persist(list, check);
+  };
+}
+function openTransfer(toName) {
+  const d = T.data, TM = tankModel(d), to = TM.byName[toName], from = TM.byName[to.topUpFrom] || TM.tanks.find(t => t.name !== toName);
+  if (!from) return toast('Add another tank first.');
+  const room = to.level != null ? to.capacity - to.level : to.capacity, avail = from.level != null ? from.level : room;
+  const guess = Math.max(0, Math.round(Math.min(room, avail) / 500) * 500);
+  const wrap = document.createElement('div'); wrap.className = 'sheet-wrap';
+  wrap.innerHTML = `<div class="scrim"></div><div class="sheet"><h3>Top up ${esc(toName)}</h3>
+    <p class="small muted">Log water you let across, so both tanks stay right.</p>
+    <label class="fl">From</label><select id="x-from" class="inp">${TM.tanks.filter(t => t.name !== toName).map(t => `<option ${t.name === from.name ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
+    <label class="fl">About how many litres?</label><input id="x-l" class="inp huge" inputmode="numeric" value="${guess || ''}">
+    <p class="hint">${to.level != null ? `${esc(toName)} has room for about ${nf.format(Math.round(room / 100) * 100)} L.` : ''}${from.level != null ? ` ${esc(from.name)} has about ${nf.format(Math.round(from.level / 100) * 100)} L.` : ''}</p>
+    <div class="row2" style="margin-top:14px"><button class="ghost" data-close>Cancel</button><button class="btn" id="x-save">Save</button></div></div>`;
+  document.body.appendChild(wrap); requestAnimationFrame(() => wrap.classList.add('open'));
+  const close = () => { wrap.classList.remove('open'); setTimeout(() => wrap.remove(), 250); };
+  wrap.querySelector('.scrim').onclick = close; wrap.querySelector('[data-close]').onclick = close;
+  wrap.querySelector('#x-save').onclick = async e => {
+    const L = Number(String(wrap.querySelector('#x-l').value).replace(/[,\s]/g, ''));
+    if (!(L > 0)) return toast('Enter the litres moved.');
+    e.target.disabled = true; e.target.textContent = 'Saving…';
+    try { await api('addTransfer', { from: wrap.querySelector('#x-from').value, to: toName, litres: L, note: 'Top-up' }); close(); renderTanks(); toast('Saved.'); }
+    catch (err) { toast(err.message === 'Failed to fetch' ? 'No connection. Try again when you have signal.' : err.message); e.target.disabled = false; e.target.textContent = 'Save'; }
+  };
+}
+
 function tankOutlook(start, rate) { // one-year replay through all years, for the plain-language lines
   const hs = histories('all'), sims = hs.map(h => simulate(h.rain, rate, start, 365));
   const lows = sims.map(s => s.min), lowDays = sims.map(s => s.minDay);
@@ -740,15 +925,20 @@ function renderTanks() {
     }
     el.innerHTML = '<div class="skeleton">Fetching your tanks…</div>'; if (!T.busy) refreshTanks(); return;
   }
-  const d = T.data, s = d.settings, t = d.totals, now = d.now;
-  const usable = Math.max(0, now.tank - s.reserveLitres);
-  const R = seasonRate(t.recentRate, new Date().getMonth()), o = tankOutlook(now.tank, R);
+  const d = T.data, s = d.settings, TM = tankModel(d);
+  if (d.empty) return renderTanksSimple(el, d, TM);
+  const t = d.totals, now = d.now;
+  const nowTank = d.tanks && d.tanks.length && TM.sysKnown ? TM.sysTotal : now.tank;
+  const R = seasonRate(t.recentRate, new Date().getMonth()); annotateTanks(TM, R);
+  const usable = Math.max(0, nowTank - (s.reserveLitres || 0)), o = tankOutlook(nowTank, R);
+  const extra = TM.tanks.filter(x => !x.inSystem && x.level != null), extraL = sum(extra.map(x => x.level));
   const daysNoRain = (() => { const ms = todayMonths(1500), prof = useByMonth(R); let b = usable, i = 0; while (b > 0 && i < 1500) b -= prof[ms[i++]]; return i; })();
   const sinceRead = now.daysSinceReading;
   const verdict = o.low > 40000 ? 'Plenty to get through summer.' : o.low > 20000 ? 'Enough for summer, but it will get tight by autumn.' : 'Tight. Worth cutting back now.';
   const alerts = [];
   if (t.highUse) alerts.push(`Use since the last reading was <b>${nf.format(t.latestRate)} L/day</b>, well above your usual ${nf.format(t.prevRecentRate)}. Check for a leak or a tap left on.`);
   if (sinceRead > 8) alerts.push(`Last meter reading was ${Math.floor(sinceRead)} days ago, so today's figure is an estimate. A fresh reading sharpens everything.`);
+  TM.tanks.filter(x => x.low).forEach(x => alerts.push(`<b>${esc(x.name)}</b> is down to about ${nf.format(Math.round(x.level / 100) * 100)} L. Time to top it up${x.topUpFrom ? ' from the ' + esc(x.topUpFrom) : ''}. <button class="linkbtn" data-topup="${esc(x.name)}">Log the top-up</button>`));
   if (T.stale) alerts.push(`Offline: showing figures from ${new Date(T.at).toLocaleString('en-AU', { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.`);
 
   // rain lines
@@ -764,16 +954,14 @@ function renderTanks() {
     ${alerts.map(a => `<div class="alert">${a}</div>`).join('')}
     <div class="card">
       <div class="q">How much water have we got?</div>
-      <div class="hero-row">${tankSvg(now.tank, s)}
-        <div><div class="big num">${nf.format(Math.round(usable / 100) * 100)}</div><div class="muted small">litres usable now</div>
-        <p class="small" style="margin-top:8px">${nf.format(now.tank)} L in the tanks, less the ${(Math.round(s.reserveLitres / 1000) + 'k')} the pump can't reach.</p></div>
-      </div>
-      <h3 class="answer" style="margin-top:12px">${verdict}</h3>
+      <div class="hero-num"><span class="big num">${nf.format(Math.round(usable / 100) * 100)}</span><span class="muted small">litres usable in the main supply${s.reserveLitres ? `, after the ${Math.round(s.reserveLitres / 1000)}k the pump can't reach` : ''}${extraL ? `. Plus about ${nf.format(Math.round(extraL / 100) * 100)} L in ${extra.map(x => esc(x.name)).join(' and ')}.` : '.'}</span></div>
+      ${myTanksCard(TM, d)}
+      <h3 class="answer" style="margin-top:14px">${verdict}</h3>
       <p class="explain">In a typical year the tanks bottom out around <b>${MON[o.lowMonth]}</b> at about ${nf.format(Math.round(o.low / 1000) * 1000)} L. With no rain at all, it would last about ${daysNoRain} days, with winter use dropping to about ${nf.format(winterUse())} L a day.</p>
       <p class="tiny muted">Last reading ${fmtWhen(d.lastReading.local)} · ${nf.format(d.lastReading.meter)} L on the meter${sinceRead > 0.5 ? ' · today is estimated' : ''}</p>
     </div>
     <button class="btn big-btn" id="t-log">+ Log a meter reading</button>
-    ${aheadCard(now.tank)}
+    ${aheadCard(nowTank)}
     ${card({
       q: 'Are we using too much?',
       headline: o.safe ? (R > o.safe + 15 ? `A little. Through spring and summer the rain reliably supports about ${o.safe} L a day.` : `No. You're within what the roof can reliably supply.`) : `Lately ${nf.format(t.recentRate)} L a day.`,
@@ -795,19 +983,44 @@ function renderTanks() {
     })}
     <div class="card">
       <div class="q">Keep the numbers honest</div>
-      <p class="explain">The tank level is worked out from the meter and the rain. If you measure the tanks or your rain gauge disagrees, enter it here and the numbers correct themselves.</p>
-      <div class="row2"><button class="ghost" id="t-rain">Enter rain by hand</button><button class="ghost" id="t-check">Record tank level</button></div>
-      ${d.checks.length ? `<p class="tiny muted" style="margin-top:8px">Last check: ${nf.format(d.checks[d.checks.length - 1].litres)} L.</p>` : ''}
+      <p class="explain">Tank levels are worked out from the meter, the rain and any water you move. Tap a tank above to say how full it really is, and log top-ups so both tanks stay right.</p>
+      <div class="row2"><button class="ghost" id="t-rain">Enter rain by hand</button>${TM.tanks.some(x => x.topUpFrom) ? `<button class="ghost" id="t-topup">Log a top-up</button>` : ''}</div>
+      ${(d.transfers || []).length ? `<p class="tiny muted" style="margin-top:8px">Last top-up: ${nf.format(d.transfers[d.transfers.length - 1].litres)} L from ${esc(d.transfers[d.transfers.length - 1].from)}, ${fmtWhen(d.transfers[d.transfers.length - 1].local)}.</p>` : ''}
     </div>
-    <p class="note">Your readings live in your private Google Sheet. <a href="https://docs.google.com/spreadsheets/d/1-jxUCdUG4zsni5m9vYbpUEs54PbtBwCKq36Yb_zdKgE/edit" target="_blank" rel="noopener">Open the sheet</a></p>`;
+    ${d.household === 'Home' || !d.household ? `<p class="note">Your readings live in your private Google Sheet. <a href="https://docs.google.com/spreadsheets/d/1-jxUCdUG4zsni5m9vYbpUEs54PbtBwCKq36Yb_zdKgE/edit" target="_blank" rel="noopener">Open the sheet</a></p>` : ''}`;
+  bindTankTiles(el);
   el.querySelectorAll('svg.chart').forEach(bindTips);
-  drawAhead(now.tank);
-  $('#ah-rate').oninput = e => { outlook.rate = +e.target.value; outlook.touched = true; drawAhead(now.tank); };
+  drawAhead(nowTank);
+  $('#ah-rate').oninput = e => { outlook.rate = +e.target.value; outlook.touched = true; drawAhead(nowTank); };
   $('#t-log').onclick = () => openForm('reading');
   $('#t-rain').onclick = () => openForm('rain');
-  $('#t-check').onclick = () => openForm('check');
+  if ($('#t-topup')) $('#t-topup').onclick = () => openTransfer((TM.tanks.find(x => x.topUpFrom) || {}).name);
   el.querySelectorAll('[data-del-reading]').forEach(b => b.onclick = () => confirmDelete('deleteReading', { at: b.dataset.delReading }, `the reading from ${fmtWhen(b.dataset.delReading)}`));
   el.querySelectorAll('[data-del-rain]').forEach(b => b.onclick = () => confirmDelete('deleteRain', { date: b.dataset.delRain }, `the rain entry for ${dayLabel(b.dataset.delRain)}`));
+}
+function bindTankTiles(el) {
+  el.querySelectorAll('[data-tank]').forEach(b => b.onclick = () => openTankSheet(b.dataset.tank));
+  el.querySelectorAll('[data-topup]').forEach(b => b.onclick = () => openTransfer(b.dataset.topup));
+  if ($('#tk-add')) $('#tk-add').onclick = () => openTankSheet(null);
+}
+// A household with no water meter yet: tanks tracked from estimates and roof rain alone.
+function renderTanksSimple(el, d, TM) {
+  annotateTanks(TM, 0);
+  const lpm = sum(TM.tanks.filter(isRoofFed).map(x => x.lpm)), fc = (d.forecast && d.forecast.days) || [], fcMm = sum(fc.slice(0, 7).map(f => f.mm || 0));
+  const known = TM.tanks.filter(x => x.level != null);
+  el.innerHTML = `
+    <div class="view-head"><h1>Tanks</h1><span class="sub">Hi ${esc(T.who || '')}</span></div>
+    ${T.stale ? `<div class="alert">Offline: showing figures from ${new Date(T.at).toLocaleString('en-AU', { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.</div>` : ''}
+    ${TM.tanks.filter(x => x.low).map(x => `<div class="alert"><b>${esc(x.name)}</b> is down to about ${nf.format(Math.round(x.level / 100) * 100)} L. <button class="linkbtn" data-topup="${esc(x.name)}">Log a top-up</button></div>`).join('')}
+    <div class="card">
+      <div class="q">How much water have we got?</div>
+      ${TM.tanks.length ? `<div class="hero-num"><span class="big num">${known.length ? nf.format(Math.round(TM.knownTotal / 100) * 100) : '–'}</span><span class="muted small">${known.length ? `litres across ${known.length === TM.tanks.length ? 'your tanks' : known.length + ' of your ' + TM.tanks.length + ' tanks'} (${Math.round(TM.knownTotal / Math.max(1, sum(known.map(x => x.capacity))) * 100)}% full)` : 'Tap a tank to say how full it is'}</span></div>`
+        : `<h3 class="answer">Add your tanks to get started.</h3><p class="explain">Give each tank its size and roughly how full it is. If a roof feeds it, add the roof area under "Where its water comes from" and rain will top up the estimate by itself.</p>`}
+      ${myTanksCard(TM, d)}
+    </div>
+    ${fc.length ? card({ q: 'Is rain coming?', headline: fcMm >= 2 ? `About ${fmtMm(fcMm)} forecast this week${lpm ? `, worth roughly ${nf.format(Math.round(fcMm * lpm / 100) * 100)} L` : ''}.` : 'Little rain forecast this week.', chart: fcRow(d), explain: lpm ? '<span class="tiny">Rain is added to roof-fed tanks automatically each morning.</span>' : '<span class="tiny">Add a roof area to a tank and rain will be counted automatically.</span>' }) : ''}
+    <p class="note">Estimates go up with rain and reset whenever you say how full a tank is. Have a water meter? Tick "The water meter is on this tank" and the app can track daily use too.</p>`;
+  bindTankTiles(el);
 }
 const shortSrc = s => /SILO/.test(s) ? 'SILO' : /Open-Meteo/.test(s) ? 'estimate' : /Willy|BOM/.test(s) ? 'BOM' : s;
 const fmtMm = v => (Math.round(v * 10) / 10) + ' mm';
