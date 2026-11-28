@@ -32,6 +32,7 @@ function tagFor(p) { return p >= 67 ? 'wet' : p <= 33 ? 'dry' : ''; }
 
 // ---------------------------------------------------------------- data model
 let D = null; // derived data
+let DRV = null; // data/drivers.json: event years plus what the climate drivers are doing now
 
 function deriveData(raw) {
   const start = Date.UTC(1889, 0, 1);
@@ -146,259 +147,217 @@ function decadeChart({ items, avg, futureLabel }) {
 }
 const decadeLegend = (avg, extra) => `<span><i style="background:var(--cool)"></i>Wetter than the ${nf.format(avg)} mm average</span><span><i style="background:var(--warm)"></i>Drier</span>${extra || ''}`;
 
-// ================================================================= RAIN: THIS YEAR
-function renderThisYear(el) {
-  const y = D.endYear, doy = D.endDoy;
-  const cum = arr => { const out = []; let t = 0; for (let i = 0; i < 365; i++) { t += arr[i] || 0; out.push(t); } return out; };
-  const curves = D.full.map(yy => cum(D.byYear[yy]));
-  const nowCum = cum(D.byYear[y]).slice(0, doy + 1);
-  const ytdAll = curves.map(c => c[doy]);
-  const ytd = nowCum[doy], p = pctBelow(ytdAll, ytd);
-  const rank = ytdAll.filter(v => v > ytd).length + 1;
-  const bands = [0.1, 0.25, 0.5, 0.75, 0.9].map(q => Array.from({ length: 365 }, (_, i) => quantile(curves.map(c => c[i]), q)));
+// ================================================================= RAIN
+// Three things only: how this year's four seasons compared with history, what the next four
+// seasons look like, and the weather systems plus the real forecast for Norton Summit.
+const SEAS = [
+  { key: 'summer', name: 'Summer', sub: 'Dec–Feb', months: [12, 1, 2] },
+  { key: 'autumn', name: 'Autumn', sub: 'Mar–May', months: [3, 4, 5] },
+  { key: 'winter', name: 'Winter', sub: 'Jun–Aug', months: [6, 7, 8] },
+  { key: 'spring', name: 'Spring', sub: 'Sep–Nov', months: [9, 10, 11] }
+];
+const MSTART = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365]; // day-of-year each month starts (365-day year)
+const SEAS_DAYS = s => s.months.reduce((t, m) => t + MSTART[m] - MSTART[m - 1], 0);
+// A season "instance" is { s, Y }. Summer Y runs from Dec of Y-1 to Feb of Y.
+function seasonDaily(s, Y) {
+  const out = [];
+  s.months.forEach(m => { const arr = D.byYear[s.key === 'summer' && m === 12 ? Y - 1 : Y]; for (let i = MSTART[m - 1]; i < MSTART[m]; i++) out.push(arr ? arr[i] : null); });
+  return out;
+}
+function seasonMm(s, Y, k) { // total of the first k days (all days if k omitted); null if any are missing
+  const a = seasonDaily(s, Y).slice(0, k == null ? undefined : k); let t = 0;
+  for (const v of a) { if (v == null) return null; t += v; }
+  return t;
+}
+const seasonOf = m => SEAS.find(s => s.months.includes(m));
+const nextInst = i => { const n = SEAS.indexOf(i.s); return n === 3 ? { s: SEAS[0], Y: i.Y + 1 } : { s: SEAS[n + 1], Y: i.Y }; };
+const prevInst = i => { const n = SEAS.indexOf(i.s); return n === 0 ? { s: SEAS[3], Y: i.Y - 1 } : { s: SEAS[n - 1], Y: i.Y }; };
+const instName = i => i.s.key === 'summer' ? `Summer ${String(i.Y - 1).slice(2)}–${String(i.Y).slice(2)}` : `${i.s.name} ${i.Y}`;
+const instSub = i => i.s.key === 'summer' ? `Dec ${i.Y - 1} – Feb ${i.Y}` : i.s.sub;
+const allLabels = () => { const out = []; for (let Y = 1890; Y <= D.endYear + 1; Y++) out.push(Y); return out; };
 
-  const seasons = [
-    { name: 'Autumn', sub: 'Mar–May', months: [3, 4, 5] },
-    { name: 'Winter', sub: 'Jun–Aug', months: [6, 7, 8] },
-    { name: 'Spring', sub: 'Sep–Nov', months: [9, 10, 11] },
-    { name: 'Summer', sub: 'Dec–Feb', months: [12] }
-  ].map(s => {
-    const firstDoy = Math.floor((Date.UTC(2025, s.months[0] - 1, 1) - Date.UTC(2025, 0, 1)) / DAY);
-    const lastDoy = Math.floor((Date.UTC(2025, s.months[s.months.length - 1], 0) - Date.UTC(2025, 0, 1)) / DAY);
-    if (doy < firstDoy) return null;
-    const cut = Math.min(doy, lastDoy);
-    const v = seasonTotal(y, s.months, cut), all = D.full.map(yy => seasonTotal(yy, s.months, cut));
-    return Object.assign(s, { v, p: pctBelow(all, v), med: median(all), partial: cut < lastDoy });
-  }).filter(Boolean);
-
-  // plain-language headline built from the data
-  const yearWord = p >= 67 ? 'a wet year' : p <= 33 ? 'a dry year' : 'about a normal year';
-  const standout = seasons.filter(s => !s.partial).sort((a, b) => Math.abs(b.p - 50) - Math.abs(a.p - 50))[0];
-  const latest = seasons[seasons.length - 1];
-  let headline = `${y} has been ${yearWord} so far`;
-  if (standout && Math.abs(standout.p - 50) >= 25) headline += `, mostly thanks to ${standout.p >= 50 ? 'a very wet' : 'a very dry'} ${standout.name.toLowerCase()}`;
-  if (latest.partial && Math.abs(latest.p - 50) >= 20 && (latest.p >= 50) !== (p >= 50)) headline += `, but ${latest.name.toLowerCase()} has turned ${latest.p >= 50 ? 'wet' : 'dry'}`;
-  headline += '.';
-  const explain = `By ${doyToDate(doy, y)} a typical year has brought <b>${mm(bands[2][doy])}</b>. This year: <b>${mm(ytd)}</b>, ${ordinal(rank)} wettest of ${ytdAll.length + 1} years.`;
-
-  // chart: this year's running total against a typical year and the normal range (middle half of years)
-  const W = 340, H = 210, pl = 36, pr = 52, pt = 8, pb = 22;
-  const ymax = Math.ceil(Math.max(bands[3][364], ytd) / 200) * 200 + 100;
-  const X = i => pl + i / 364 * (W - pl - pr), Y = v => pt + (1 - v / ymax) * (H - pt - pb);
-  const pts = arr => arr.map((v, i) => [X(i), Y(v)]);
-  let g = yAxis(Y, niceTicks(ymax, 4), W, pl, pr);
-  g += `<path d="${area(pts(bands[3]), pts(bands[1]))}" fill="var(--band)"/>`;
-  g += `<path d="${path(pts(bands[2]))}" fill="none" stroke="var(--ink-3)" stroke-width="1.5" stroke-dasharray="4 3"/>`;
-  g += `<path d="${path(pts(nowCum))}" fill="none" stroke="var(--water)" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>`;
-  g += `<circle cx="${X(doy)}" cy="${Y(ytd)}" r="5" fill="var(--water)" stroke="var(--card)" stroke-width="2"/>`;
-  g += `<text x="${X(doy) - 6}" y="${Y(ytd) - 9}" text-anchor="end" style="fill:var(--water);font-weight:700;font-size:12px">${y}: ${nf.format(ytd)}</text>`;
-  g += `<text class="lbl" x="${W - pr + 4}" y="${Y(bands[2][364]) + 4}">typical</text><text class="lbl" x="${W - pr + 4}" y="${Y(bands[2][364]) + 17}">${nf.format(bands[2][364])}</text>`;
-  for (let m = 0; m < 12; m += 2) { const i = Math.floor((Date.UTC(2025, m, 1) - Date.UTC(2025, 0, 1)) / DAY); g += `<text x="${X(i)}" y="${H - 6}">${MON[m]}</text>`; }
-  for (let i = 0; i < 365; i += 7) {
-    const now = i <= doy ? `<br>${y}: <b>${mm(nowCum[i])}</b>` : '';
-    g += `<rect x="${X(i)}" y="0" width="${(W - pl - pr) / 52 + 0.5}" height="${H - pb}" fill="transparent" data-tip="<b>By ${doyToDate(i)}</b>${now}<br>Typical year: ${mm(bands[2][i])}<br>Normal range: ${nf.format(bands[1][i])}–${nf.format(bands[3][i])} mm"/>`;
-  }
-
-  // numbers: month by month
-  const mNow = D.monthly[y], lastM = new Date(Date.UTC(2025, 0, 1) + doy * DAY).getUTCMonth();
-  const monthRows = [];
-  for (let m = 0; m <= lastM; m++) {
-    const all = D.full.map(yy => D.monthly[yy][m]), v = mNow[m], pp = pctBelow(all, v);
-    monthRows.push([MON[m] + (m === lastM ? ' (so far)' : ''), nf.format(v), nf.format(median(all)), m === lastM ? '–' : `<span class="tag ${tagFor(pp)}">${pp >= 67 ? 'wet' : pp <= 33 ? 'dry' : 'normal'}</span>`]);
-  }
-  const sWord = s => s.p >= 90 ? 'very wet' : s.p >= 67 ? 'wet' : s.p <= 10 ? 'very dry' : s.p <= 33 ? 'dry' : 'normal';
-
-  el.innerHTML =
-    card({
-      q: 'How is this year going?', headline, explain,
-      chart: `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Rain building up through ${y} against a typical year">${g}</svg>`,
-      legend: `<span><i class="line" style="background:var(--water)"></i>${y} so far</span><span><i class="line" style="background:var(--ink-3)"></i>Typical year</span><span><i style="background:var(--band)"></i>Normal range (middle half of years)</span>`,
-      numbers: table(['Month', `${y} mm`, 'Typical mm', ''], monthRows, { note: 'Typical = the middle value for that month since 1889. Wet or dry = in the wettest or driest third of years.' }),
-      numbersLabel: 'See each month'
-    }) +
-    card({
-      q: 'Season by season',
-      headline: seasons.filter(s => s.name !== 'Summer').map(s => `${s.name}${s.partial ? ' (so far)' : ''} ${s.partial ? 'is' : 'was'} ${sWord(s)}`).join(', ').replace(/, ([^,]*)$/, ' and $1') + '.',
-      chart: `<div class="chips">${seasons.filter(s => s.name !== 'Summer').map(s => `<div class="chipcard"><span>${s.name}${s.partial ? ' so far' : ''}</span><b>${nf.format(s.v)}<span class="tiny muted">&nbsp;mm</span></b><span>typical ${nf.format(s.med)}</span><span class="tag ${tagFor(s.p)}">${sWord(s)}</span></div>`).join('')}</div>`
-    }) +
-    `<p class="note">Rain for the Norton Summit area: the average of two 5 km SILO grid cells, 1889 to ${doyToDate(doy, y)} ${y}, counted on the 9 am rain day.</p>`;
-  el.querySelectorAll('svg.chart').forEach(bindTips);
+// The season we're in now (or the last one, if the current one has barely started) and the three before it.
+function lastFourSeasons() {
+  const m = D.endDate.getUTCMonth() + 1, s = seasonOf(m);
+  let cur = { s, Y: s.key === 'summer' && m === 12 ? D.endYear + 1 : D.endYear };
+  const have = i => seasonDaily(i.s, i.Y).findIndex(v => v == null);
+  let k = have(cur); if (k < 0) k = SEAS_DAYS(cur.s);
+  if (k < 45) { cur = prevInst(cur); k = SEAS_DAYS(cur.s); }
+  const out = [Object.assign(cur, { k, partial: k < SEAS_DAYS(cur.s) })];
+  for (let j = 0; j < 3; j++) { const p = prevInst(out[0]); out.unshift(Object.assign(p, { k: SEAS_DAYS(p.s), partial: false })); }
+  return out;
 }
 
-// ================================================================= RAIN: PATTERNS
-function renderHistory(el) {
-  const full = D.full, ann = full.map(y => D.annual[y]);
-  const split = 1990, early = full.filter(y => y < split), recent = full.filter(y => y >= split);
-  const eMean = mean(early.map(y => D.annual[y])), rMean = mean(recent.map(y => D.annual[y]));
-  const avg = mean(ann), med = median(ann), swing = quantile(ann, 0.84) - med;
-  const chgAll = (rMean / eMean - 1) * 100;
-
-  // --- 1. decades above / below the long-run average
-  const decades = []; for (let d = 1890; d <= D.lastFull; d += 10) { const ys = full.filter(y => y >= d && y < d + 10); if (ys.length) decades.push({ d, ys }); }
-  const items = decades.map(({ d, ys }, i) => {
-    const v = mean(ys.map(y => D.annual[y])), vals = ys.map(y => D.annual[y]);
-    const wet = ys[vals.indexOf(Math.max(...vals))], dry = ys[vals.indexOf(Math.min(...vals))];
-    return { label: `${d}s`, v, showLabel: i % 2 === 0 && i < decades.length - 2, hl: d === decades[decades.length - 1].d,
-      tip: `<b>${d}s${ys.length < 10 ? ` (${ys.length} years so far)` : ''}</b><br>Average ${mm(v)} a year (${signed(Math.round(v - avg))} mm)<br>Wettest ${wet}: ${nf.format(D.annual[wet])} · driest ${dry}: ${nf.format(D.annual[dry])}` };
-  });
-  const drierDecs = decades.filter(o => o.d >= 1990 && mean(o.ys.map(y => D.annual[y])) < avg).length, recentDecs = decades.filter(o => o.d >= 1990).length;
-  const decRows = decades.map(({ d, ys }) => {
-    const vals = ys.map(y => D.annual[y]), wet = ys[vals.indexOf(Math.max(...vals))], dry = ys[vals.indexOf(Math.min(...vals))];
-    return { hl: d >= 2020, cells: [`${d}s${ys.length < 10 ? ` <span class="tiny muted">(${ys.length} yrs)</span>` : ''}`, nf.format(mean(vals)), `${wet} <span class="tiny muted">${nf.format(D.annual[wet])}</span>`, `${dry} <span class="tiny muted">${nf.format(D.annual[dry])}</span>`] };
-  });
-  const q1 = card({
-    q: 'Is Norton Summit getting drier?',
-    headline: chgAll <= -4 ? 'A little drier since 1990. A nudge, not a collapse.' : chgAll >= 4 ? 'If anything it\'s a little wetter.' : 'Not much has changed overall.',
-    explain: `Each bar is a decade, above or below the long-run average of <b>${mm(avg)}</b> a year. ${drierDecs} of the ${recentDecs} decades since 1990 came in below it. A typical year now brings about <b>${mm(rMean)}</b>, ${Math.abs(Math.round(chgAll))}% ${chgAll < 0 ? 'less' : 'more'} than before 1990. Single years swing far more than that, often ${nf.format(Math.round(swing / 10) * 10)} mm either way.`,
-    chart: decadeChart({ items, avg }),
-    legend: decadeLegend(avg, `<span>Numbers: mm a year above or below</span>`),
-    numbers: table(['Decade', 'Avg mm', 'Wettest', 'Driest'], decRows),
-    numbersLabel: 'See each decade'
-  });
-
-  // --- 2. which seasons changed (tiles, no chart)
-  const rd = y => D.raw.raindays[y], hv = y => D.raw.heavydays[y];
-  const mE = Array.from({ length: 12 }, (_, m) => mean(early.map(y => D.monthly[y][m])));
-  const mR = Array.from({ length: 12 }, (_, m) => mean(recent.map(y => D.monthly[y][m])));
-  const seas = [['Autumn', 'Mar–May', [2, 3, 4]], ['Winter', 'Jun–Aug', [5, 6, 7]], ['Spring', 'Sep–Nov', [8, 9, 10]], ['Summer', 'Dec–Feb', [11, 0, 1]]]
-    .map(([n, sub, ms]) => { const e = sum(ms.map(m => mE[m])), r = sum(ms.map(m => mR[m])); return { n, sub, e, r, c: (r / e - 1) * 100 }; });
-  const word = c => c <= -12 ? 'drier' : c <= -5 ? 'a bit drier' : c >= 12 ? 'wetter' : c >= 5 ? 'a bit wetter' : 'about the same';
-  const groups = {}; seas.forEach(s => (groups[word(s.c)] = groups[word(s.c)] || []).push(s.n.toLowerCase()));
-  const join = a => a.length > 1 ? a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1] : a[0];
-  const order = ['drier', 'a bit drier', 'wetter', 'a bit wetter'];
-  const seasonHead = order.filter(w => groups[w]).map(w => `${join(groups[w])} ${groups[w].length > 1 ? 'are' : 'is'} ${w}`).join('; ').replace(/^./, c => c.toUpperCase()) + '.' + (groups['about the same'] ? ` ${cap(join(groups['about the same']))} ${groups['about the same'].length > 1 ? 'are' : 'is'} as wet as ever.` : '');
-  const drops = mE.map((e, m) => ({ m, c: (mR[m] / e - 1) * 100 })).filter(o => o.c <= -15).sort((a, b) => a.c - b.c);
-  const rdE = mean(early.map(rd)), rdR = mean(recent.map(rd)), hvE = mean(early.map(hv)), hvR = mean(recent.map(hv));
-  const q2 = card({
-    q: 'Which part of the year has changed?',
-    headline: seasonHead,
-    chart: `<div class="chips four">${seas.map(s => `<div class="chipcard"><span>${s.n} <span class="tiny">${s.sub}</span></span><b>${Math.abs(s.c) < 3 ? 'same' : pctTxt(s.c).replace('-', '−')}</b><span class="tag ${s.c <= -5 ? 'dry' : s.c >= 5 ? 'wet' : ''}">${word(s.c)}</span></div>`).join('')}</div>`,
-    explain: `Since 1990 compared with before. ${drops.length ? `The biggest drops are ${drops.slice(0, 3).map(o => `${MON[o.m]} (${pctTxt(o.c)})`).join(', ')}, so the tanks wait longer to start refilling. ` : ''}We get about ${Math.round(rdE - rdR)} fewer rainy days a year, but the big soaking falls that fill tanks are ${Math.abs(hvR / hvE - 1) < 0.1 ? 'as common as ever' : hvR < hvE ? 'a little less common' : 'a little more common'}.`,
-    numbers: table(['Month', '1889–1989', `1990–${String(D.lastFull).slice(2)}`, 'Change'], mE.map((e, m) => ({ hl: Math.abs(mR[m] / e - 1) >= 0.15, cells: [MON[m], nf.format(e), nf.format(mR[m]), pctTxt((mR[m] / e - 1) * 100)] })).concat([
-      { cells: ['<b>Rainy days a year</b>', Math.round(rdE), Math.round(rdR), pctTxt((rdR / rdE - 1) * 100)] },
-      { cells: ['<b>Falls of 20 mm+ a year</b>', hvE.toFixed(1), hvR.toFixed(1), pctTxt((hvR / hvE - 1) * 100)] }]), { note: 'Average monthly rain in mm. Highlighted rows changed by 15% or more.' }),
-    numbersLabel: 'See each month'
-  });
-
-  // --- 3. dry spells (a list, no chart)
-  const q20 = quantile(ann, 0.2);
-  const after = (cond, test) => { const ys = full.filter(y => cond(D.annual[y]) && D.annual[y + 1] != null); return Math.round(ys.filter(y => test(D.annual[y + 1])).length / ys.length * 100); };
-  const aDry = after(v => v <= q20, v => v < med);
-  const runs = []; let cur = [];
-  full.forEach(y => { if (D.annual[y] < med) cur.push(y); else { if (cur.length >= 3) runs.push(cur.slice()); cur = []; } });
-  if (cur.length >= 3) runs.push(cur);
-  runs.sort((a, b) => b.length - a.length || a[0] - b[0]);
-  const stretch = k => full.slice(k - 1).map((y, i) => ({ y0: full[i], y1: y, v: sum(full.slice(i, i + k).map(yy => D.annual[yy])) / k })).sort((a, b) => a.v - b.v);
-  const s2 = stretch(2), s3 = stretch(3), lastPair = s2.findIndex(o => o.y1 === D.lastFull);
-  const runRow = r => ({ hl: r[r.length - 1] >= 2000, cells: [`${r[0]}–${r[r.length - 1]}`, `${r.length} years`, nf.format(mean(r.map(y => D.annual[y]))) + ' mm'] });
-  const q4 = card({
-    q: 'How bad do dry spells get?',
-    headline: `The longest run of below-average years is a recent one: ${runs[0][0]}–${runs[0][runs[0].length - 1]}.`,
-    explain: `Dry years usually come in clumps of 3 or 4. ${runs[0].length} in a row is the record. A very dry year doesn't make the next one dry: it happened ${aDry}% of the time, close to a coin toss.${lastPair >= 0 && lastPair < 5 ? ` ${D.lastFull - 1}–${D.lastFull} was the ${ordinal(lastPair + 1)} driest pair of years since 1889.` : ''}`,
-    chart: table(['Longest dry runs', '', 'Avg a year'], runs.slice(0, 4).map(runRow)),
-    numbers: table(['Dry run', 'Years', 'Avg mm'], runs.map(r => ({ hl: r[r.length - 1] >= 2000, cells: [`${r[0]}–${r[r.length - 1]}`, r.length, nf.format(mean(r.map(y => D.annual[y])))] })), { note: `Runs of 3+ years below the typical ${mm(med)}. Driest 3-year stretches: ${s3.slice(0, 3).map(o => `${o.y0}–${o.y1} (${nf.format(o.v)} mm/yr)`).join(', ')}.` }),
-    numbersLabel: 'See every dry run'
-  });
-
-  el.innerHTML = q1 + q2 + driversCard() + q4 + `<p class="note">Tap a bar for its numbers. El Niño and La Niña years follow the Bureau of Meteorology's event list.</p>`;
-  el.querySelectorAll('svg.chart').forEach(bindTips);
+function seasonStats(inst) {
+  const v = seasonMm(inst.s, inst.Y, inst.k);
+  const hist = allLabels().filter(Y => Y !== inst.Y).map(Y => ({ Y, v: seasonMm(inst.s, Y, inst.k) })).filter(o => o.v != null);
+  const vals = hist.map(o => o.v), normal = median(vals), p = pctBelow(vals, v);
+  // context: "driest since 2019", "wettest in 12 years", or on record
+  let context = 'close to normal';
+  const earlier = hist.filter(o => o.Y < inst.Y).sort((a, b) => b.Y - a.Y);
+  if (p <= 33 || p >= 67) {
+    const dry = p <= 33, beat = earlier.find(o => dry ? o.v <= v : o.v >= v);
+    const w = dry ? 'driest' : 'wettest';
+    if (!beat) context = `${w} on record`;
+    else if (inst.Y - beat.Y >= 4) context = `${w} since ${beat.Y}`;
+    else context = dry ? 'drier than most' : 'wetter than most';
+  }
+  return { v, normal, p, pctOfNormal: Math.round(v / normal * 100), context, n: vals.length + 1 };
 }
+const seasonWord = p => p >= 90 ? 'Very wet' : p >= 67 ? 'Wet' : p <= 10 ? 'Very dry' : p <= 33 ? 'Dry' : 'Normal';
+const seasonTone = p => p >= 90 ? 'wet2' : p >= 67 ? 'wet' : p <= 10 ? 'dry2' : p <= 33 ? 'dry' : '';
+const posBar = p => `<div class="posbar" aria-hidden="true"><i style="left:${Math.max(3, Math.min(97, p))}%"></i></div><div class="posends"><span>driest</span><span>wettest</span></div>`;
 
-// ================================================================= RAIN: EL NIÑO AND THE INDIAN OCEAN (a short list, no chart)
-function driversCard() {
-  const months = [4, 5, 6, 7, 8, 9, 10];
-  const refill = y => seasonTotal(y, months);
-  const base = D.full.filter(y => y >= 1900), med = median(base.map(refill));
-  const base60 = base.filter(y => y >= 1960), med60 = median(base60.map(refill));
-  const y0 = D.endYear, have = D.endDoy >= 303, v0 = have ? refill(y0) : null;
-  const rows = [
-    { label: 'El Niño', what: 'warm Pacific', ys: base.filter(y => D.EN.has(y)), med, on: D.EN.has(y0) },
-    { label: 'Positive Indian Ocean Dipole', what: 'cool water off our north-west', ys: base60.filter(y => D.IP.has(y)), med: med60, on: D.IP.has(y0) },
-    { label: 'Both at once', what: '', ys: base60.filter(y => D.EN.has(y) && D.IP.has(y)), med: med60, on: D.EN.has(y0) && D.IP.has(y0) },
-    { label: 'La Niña', what: 'cool Pacific', ys: base.filter(y => D.LN.has(y)), med, on: D.LN.has(y0) },
-    { label: 'Negative Indian Ocean Dipole', what: '', ys: base60.filter(y => D.IN.has(y)), med: med60, on: D.IN.has(y0) },
-    { label: 'Neither', what: '', ys: base.filter(y => !D.EN.has(y) && !D.LN.has(y)), med, on: false }
-  ].map(r => { const p = r.ys.map(y => refill(y) / r.med * 100); return Object.assign(r, { n: p.length, m: Math.round(median(p)), below: Math.round(p.filter(v => v < 100).length / p.length * 100), vdry: Math.round(p.filter(v => v < 75).length / p.length * 100) }); });
-  const byLabel = Object.fromEntries(rows.map(r => [r.label, r]));
-  const oneIn = p => p >= 70 ? `${Math.round(p / 10)} in 10` : p >= 45 ? 'about half' : `${Math.round(p / 10)} in 10`;
-  const list = rows.slice(0, 5).map(r => `<li><b>${r.label}</b>${r.what ? ` <span class="muted">(${r.what})</span>` : ''}: usually <b>${r.m}%</b> of normal April–October rain${r.m < 100 ? `; ${oneIn(r.below)} come in below normal` : r.m > 105 ? '' : ', so it barely matters'}.${r.on ? ` <span class="tag dry">${y0}</span>` : ''}</li>`).join('');
-  const tbl = table(['Years that were…', 'Typical', 'Below typical', 'Very dry*'], rows.map(r => ({ hl: r.on, cells: [`${r.label} <span class="tiny muted">(${r.n})</span>`, r.m + '%', r.below + '%', r.vdry + '%'] })),
-    { note: `Refill season = April to October. * Very dry = under 75% of typical. In a "Neither" year that happens ${byLabel['Neither'].vdry}% of the time. Highlighted rows apply to ${y0}. El Niño since 1900, Indian Ocean since 1960.` });
+function seasonsCard() {
+  const four = lastFourSeasons().map(i => Object.assign(i, seasonStats(i)));
+  const dry = four.filter(o => o.p <= 33).length, wet = four.filter(o => o.p >= 67).length;
+  const last = four[3];
+  let head = dry >= 3 ? `${['', '', '', 'Three', 'All four'][dry]} of the last four seasons were drier than normal.`
+    : wet >= 3 ? `${['', '', '', 'Three', 'All four'][wet]} of the last four seasons were wetter than normal.`
+    : dry && wet ? 'A mixed year: some seasons wet, some dry.'
+    : dry ? `Mostly normal, with ${dry === 1 ? 'one dry season' : 'two dry seasons'}.` : wet ? `Mostly normal, with ${wet === 1 ? 'one wet season' : 'two wet seasons'}.` : 'A pretty normal year for rain.';
+  const tiles = four.map(o => `<div class="sq ${seasonTone(o.p)}" data-tip="<b>${instName(o)}${o.partial ? ' so far' : ''}</b><br>${mm(o.v)}, normal ${mm(o.normal)}<br>Wetter than ${o.p}% of ${o.n} years since 1890">
+      <div class="sq-top"><b>${o.s.name}</b><span>${o.s.key === 'summer' ? `${String(o.Y - 1).slice(2)}–${String(o.Y).slice(2)}` : o.Y}${o.partial ? ' · so far' : ''}</span></div>
+      <div class="sq-num">${nf.format(o.v)}<small> mm</small></div>
+      <div class="sq-word">${seasonWord(o.p)} <span>${o.pctOfNormal}% of normal</span></div>
+      ${posBar(o.p)}
+      <div class="sq-foot">${cap(o.context)}</div>
+    </div>`).join('');
+  const rows = four.map(o => [instName(o) + (o.partial ? ' (so far)' : ''), nf.format(o.v), nf.format(o.normal), o.pctOfNormal + '%', o.p + '%']);
   return card({
-    q: 'Do El Niño and the Indian Ocean matter?',
-    headline: 'They tilt the odds toward a dry April–October, but they don\'t decide it.',
-    chart: `<ul class="insights">${list}</ul>`,
-    explain: `${have ? `${y0} had both dry signals and still brought <b>${Math.round(v0 / med * 100)}%</b> of a normal refill season. ` : ''}In an ordinary year, about half come in below normal.`,
-    numbers: tbl
+    q: 'How did this year’s seasons go?', headline: head,
+    chart: `<div class="sq-grid">${tiles}</div>`,
+    explain: `Each square compares the season with every year since 1890. The dot shows where it sits, from the driest year on the left to the wettest on the right.${last.partial ? ` ${last.s.name} is compared day for day up to ${doyToDate(D.endDoy, D.endYear)}.` : ''}`,
+    numbers: table(['Season', 'mm', 'Normal', '% normal', 'Wetter than'], rows, { note: 'Normal = the middle value since 1890. "Wetter than" = the share of past years this season beat.' }),
+    numbersLabel: 'See the numbers'
   });
 }
 
-// ================================================================= RAIN: EXPLORE (all the data, usefully)
-const exploreState = { year: null };
-function renderExplore(el) {
-  const yrs = D.years.slice().reverse();
-  const y = exploreState.year || D.endYear;
-  const full = D.full, ann = full.map(yy => D.annual[yy]);
-  const isPartial = y > D.lastFull;
-  const total = isPartial ? sum(D.monthly[y]) : D.annual[y];
-  const rank = isPartial ? null : ann.filter(a => a > total).length + 1;
-  const medM = Array.from({ length: 12 }, (_, m) => median(full.map(yy => D.monthly[yy][m])));
-  const p10 = Array.from({ length: 12 }, (_, m) => quantile(full.map(yy => D.monthly[yy][m]), 0.1));
-  const p90 = Array.from({ length: 12 }, (_, m) => quantile(full.map(yy => D.monthly[yy][m]), 0.9));
-  const lastM = isPartial ? new Date(Date.UTC(2025, 0, 1) + D.endDoy * DAY).getUTCMonth() : 11;
-
-  // monthly chart with typical range
-  const W = 340, H = 190, pl = 30, pr = 4, pt = 10, pb = 22;
-  const ymax = Math.ceil(Math.max(...D.monthly[y], ...medM) * 1.1 / 50) * 50, gw = (W - pl - pr) / 12, Y = v => pt + (1 - v / ymax) * (H - pt - pb);
-  let g = yAxis(Y, niceTicks(ymax, 3), W, pl, pr);
-  for (let m = 0; m < 12; m++) {
-    const x = pl + m * gw + 3, w = gw - 6, v = D.monthly[y][m];
-    if (m <= lastM) g += `<rect x="${x + 3}" y="${Y(v)}" width="${w - 6}" height="${Y(0) - Y(v)}" rx="2" fill="var(--water)" data-tip="<b>${MON[m]} ${y}</b>: ${mm(v)}<br>Typical: ${mm(medM[m])}<br>8 in 10 years: ${nf.format(p10[m])}–${nf.format(p90[m])} mm"/>`;
-    g += `<line x1="${x - 1}" x2="${x + w + 1}" y1="${Y(medM[m])}" y2="${Y(medM[m])}" stroke="var(--ink)" stroke-width="1.5"/>`;
-    g += `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${MON[m][0]}</text>`;
+// ---------------- the next four seasons: recent climate, nudged by what followed similar years here
+function projections() {
+  const now = (DRV && DRV.now) || {};
+  const set = now.enso === 'El Niño' ? D.EN : now.enso === 'La Niña' ? D.LN : null;
+  const eventYear = now.ensoYear || D.endYear;
+  const four = lastFourSeasons(); let i = four[3];
+  const out = [];
+  for (let j = 0; j < 4; j++) {
+    i = nextInst(i);
+    const s = i.s, Y = i.Y, lag = Y - eventYear;
+    const full = allLabels().map(y => ({ y, v: seasonMm(s, y) })).filter(o => o.v != null);
+    const medAll = median(full.map(o => o.v));
+    const recent = full.filter(o => o.y >= D.endYear - 35).map(o => o.v);
+    const rMed = median(recent), rLo = quantile(recent, 0.25), rHi = quantile(recent, 0.75);
+    let ratio = 1, chance = 50, an = [];
+    if (set) {
+      an = [...set].filter(e => e >= 1900 && e !== eventYear).map(e => ({ e, Y: e + lag, v: seasonMm(s, e + lag) })).filter(o => o.v != null);
+      const w = an.length / (an.length + 15); // small samples count for less
+      ratio = 1 + (median(an.map(o => o.v / medAll)) - 1) * w;
+      chance = 50 + (an.filter(o => o.v > medAll).length / an.length * 100 - 50) * w;
+    } else {
+      const neither = full.filter(o => !D.EN.has(o.y - 1) && !D.LN.has(o.y - 1));
+      chance = Math.round(neither.filter(o => o.v > medAll).length / neither.length * 100);
+    }
+    const bom = now.outlook && now.outlook.season === s.key && now.outlook.year === Y ? now.outlook : null;
+    if (bom) chance = (chance + bom.chanceAbove) / 2; // the Bureau's model gets an equal say for the season it covers
+    out.push({ i, expect: rMed * ratio, lo: rLo * ratio, hi: rHi * ratio, chance: Math.round(chance), an, medAll, rMed, bom, ratio });
   }
+  return out;
+}
+function outlookCard() {
+  const P = projections(), now = (DRV && DRV.now) || {};
+  const lean = c => c >= 58 ? ['Leaning wet', 'wet'] : c <= 42 ? ['Leaning dry', 'dry'] : ['Even odds', ''];
+  const tiles = P.map(o => { const [w, tone] = lean(o.chance); return `<div class="sq ${tone}">
+      <div class="sq-top"><b>${o.i.s.name}</b><span>${o.i.s.key === 'summer' ? `${String(o.i.Y - 1).slice(2)}–${String(o.i.Y).slice(2)}` : o.i.Y}</span></div>
+      <div class="sq-num"><span class="tiny muted">about</span> ${nf.format(Math.round(o.expect / 5) * 5)}<small> mm</small></div>
+      <div class="sq-word">${w}</div>
+      <div class="sq-foot">Likely ${nf.format(Math.round(o.lo / 5) * 5)}–${nf.format(Math.round(o.hi / 5) * 5)} mm<br>${Math.round(o.chance / 10)} in 10 chance of a wetter than normal ${o.i.s.name.toLowerCase()}${o.bom ? '<br><span class="bom">Bureau model: ' + esc(o.bom.text) + '</span>' : ''}</div>
+    </div>`; }).join('');
+  const wetter = P.filter(o => o.chance >= 58).map(o => o.i.s.name.toLowerCase()), drier = P.filter(o => o.chance <= 42).map(o => o.i.s.name.toLowerCase());
+  const join = a => a.length > 1 ? a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1] : a[0];
+  const head = !wetter.length && !drier.length ? 'No strong lean either way for the year ahead.'
+    : `${wetter.length ? `${cap(join(wetter))} ${wetter.length > 1 ? 'lean' : 'leans'} wet` : ''}${wetter.length && drier.length ? '; ' : ''}${drier.length ? `${wetter.length ? join(drier) : cap(join(drier))} ${drier.length > 1 ? 'lean' : 'leans'} dry` : ''}. ${P.filter(o => o.chance > 42 && o.chance < 58).length ? 'The rest could go either way.' : ''}`;
+  const nAn = P[0].an.length;
+  const rows = P.map(o => [instName(o.i), nf.format(o.rMed), (o.ratio >= 1 ? '+' : '−') + Math.abs(Math.round((o.ratio - 1) * 100)) + '%', nf.format(o.expect), o.chance + '%']);
+  const anList = P[2] && P[2].an.length ? P[2].an.slice().sort((a, b) => b.e - a.e).slice(0, 8).map(o => `${o.Y} ${Math.round(o.v / P[2].medAll * 100)}%`).join(', ') : '';
+  return card({
+    q: 'What about the next four seasons?', headline: head,
+    chart: `<div class="sq-grid">${tiles}</div>`,
+    explain: now.enso ? `We start from the rain of the last 35 years (the climate we have now), then nudge it by what happened here after the ${nAn} other ${now.enso} years since 1900. Seasonal forecasts are about odds, not promises: a wet-leaning season can still come in dry.` : 'Based on the rain of the last 35 years. With no El Niño or La Niña, the odds sit close to even.',
+    numbers: table(['Season', 'Recent normal', 'Nudge', 'Projection', 'Chance wetter'], rows,
+      { note: `Recent normal = middle value since ${D.endYear - 35}. Nudge = the typical effect in the year after ${now.enso || 'similar'} years, scaled down because there are only ${nAn} of them.${anList ? ` Winter after recent ${now.enso} years: ${anList} of normal.` : ''}${P[0].bom ? ` For ${P[0].i.s.name.toLowerCase()}, the Bureau's ACCESS-S model gets an equal say (issued ${fmtDate(P[0].bom.issued)}).` : ''}` }),
+    numbersLabel: 'How the projection works'
+  });
+}
+const fmtDate = s => { const d = new Date(s + 'T00:00'); return d.getDate() + ' ' + MON[d.getMonth()] + ' ' + d.getFullYear(); };
 
-  // records
-  const top = (arr, k, desc) => arr.slice().sort((a, b) => desc ? b.v - a.v : a.v - b.v).slice(0, k);
-  const yearsArr = full.map(yy => ({ k: String(yy), v: D.annual[yy] }));
-  const monthsArr = []; full.forEach(yy => D.monthly[yy].forEach((v, m) => monthsArr.push({ k: `${MON[m]} ${yy}`, v })));
-  const daysArr = []; for (let i = 0; i < D.n; i++) if (D.daily[i] >= 60) { const d = new Date(D.start + i * DAY); daysArr.push({ k: `${d.getUTCDate()} ${MON[d.getUTCMonth()]} ${d.getUTCFullYear()}`, v: D.daily[i] }); }
-  const recRows = (arr) => arr.map((o, i) => [`${i + 1}. ${o.k}`, nf.format(o.v)]);
+// ---------------- the real forecast (Open-Meteo, fetched straight from the phone)
+const FC = { data: null, at: 0, err: null };
+const FC_URL = 'https://api.open-meteo.com/v1/forecast?latitude=-34.9227&longitude=138.725&daily=precipitation_sum,precipitation_probability_max,temperature_2m_max&timezone=Australia%2FAdelaide&forecast_days=14';
+async function loadForecast() {
+  if (FC.data && Date.now() - FC.at < 30 * 60000) return;
+  try {
+    const j = await fetch(FC_URL).then(r => r.json());
+    FC.data = j.daily.time.map((t, i) => ({ date: t, mm: j.daily.precipitation_sum[i] || 0, chance: j.daily.precipitation_probability_max[i], max: j.daily.temperature_2m_max[i] }));
+    FC.at = Date.now(); FC.err = null;
+    try { localStorage.setItem('tal-fc', JSON.stringify({ at: FC.at, data: FC.data })); } catch (e) {}
+  } catch (e) {
+    FC.err = e.message;
+    try { const c = JSON.parse(localStorage.getItem('tal-fc')); if (c) { FC.data = c.data; FC.at = c.at; } } catch (e2) {}
+  }
+}
+function forecastCard() {
+  if (!FC.data) return `<div class="card" id="fc-card"><div class="q">Rain forecast for Norton Summit</div><p class="explain">${FC.err ? 'Can’t reach the forecast right now.' : 'Loading the forecast…'}</p></div>`;
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Adelaide' });
+  const days = FC.data.filter(f => f.date >= today);
+  const wk = days.slice(0, 7), wk2 = days.slice(7, 14);
+  const t1 = sum(wk.map(f => f.mm)), t2 = sum(wk2.map(f => f.mm));
+  const wetDays = wk.filter(f => f.mm >= 1);
+  const dname = f => new Date(f.date + 'T00:00').toLocaleDateString('en-AU', { weekday: 'long' });
+  const head = t1 < 1 ? 'A dry week ahead.' : wetDays.length === 1 ? `About ${Math.round(t1)} mm this week, nearly all on ${dname(wetDays[0])}.`
+    : `About ${Math.round(t1)} mm this week, spread over ${wetDays.length} days.`;
+  const tiles = `<div class="fc-row">${wk.map(f => { const dt = new Date(f.date + 'T00:00');
+    return `<div class="${f.mm >= 2 ? 'wet' : ''}">${dt.toLocaleDateString('en-AU', { weekday: 'short' })}<b>${f.mm >= 0.5 ? Math.round(f.mm) : '–'}</b>${f.mm >= 0.5 ? 'mm' : '&nbsp;'}<span class="fc-c">${f.chance != null ? f.chance + '%' : ''}</span><span class="fc-t">${Math.round(f.max)}°</span></div>`; }).join('')}</div>`;
+  const dec = (D.raw && D.monthly) ? median(D.full.map(y => D.monthly[y][new Date().getMonth()])) : null;
+  const age = Math.round((Date.now() - FC.at) / 60000);
+  return `<div class="card" id="fc-card">
+    <div class="q">Rain forecast for Norton Summit</div>
+    <h3 class="answer">${head}</h3>
+    ${tiles}
+    <p class="explain">Rain in mm, chance of any rain, and the top temperature. The week after looks ${t2 < 1 ? 'dry' : `like about ${Math.round(t2)} mm`}.${dec ? ` A normal ${MON[new Date().getMonth()]} brings ${mm(dec)} in total.` : ''}</p>
+    <p class="tiny muted" style="margin:6px 2px 0">Open-Meteo, which blends the Bureau's ACCESS-G with the European and US models. ${FC.err ? `Offline: from ${age < 90 ? age + ' min' : Math.round(age / 60) + ' h'} ago.` : ''}</p>
+  </div>`;
+}
 
-  const word = isPartial ? null : (() => { const p = pctBelow(ann, total); return p >= 90 ? 'one of the wettest years on record' : p >= 67 ? 'a wet year' : p > 33 ? 'about a normal year' : p > 10 ? 'a dry year' : 'one of the driest years on record'; })();
-  const drivers = [D.EN.has(y) ? 'El Niño' : D.LN.has(y) ? 'La Niña' : null, D.IP.has(y) ? 'positive IOD' : D.IN.has(y) ? 'negative IOD' : null].filter(Boolean);
+// ---------------- the big weather systems, in plain words
+function driversNowCard() {
+  const now = (DRV && DRV.now);
+  if (!now) return '';
+  // our own numbers: what followed El Niño / positive IOD years here
+  const after = (set, s, lag) => { const full = allLabels().map(y => seasonMm(s, y)).filter(v => v != null), m = median(full);
+    const v = [...set].filter(e => e >= 1900).map(e => seasonMm(s, e + lag)).filter(x => x != null); return { pct: Math.round(median(v.map(x => x / m * 100))), n: v.length }; };
+  const spring = SEAS[3], winter = SEAS[2], summer = SEAS[0];
+  const enSpring = after(D.EN, spring, 0), enSummer = after(D.EN, summer, 1), enWinterAfter = after(D.EN, winter, 1);
+  const list = (now.items || []).map(it => {
+    let ours = '';
+    if (it.key === 'enso') ours = `Here, El Niño springs have brought a median ${enSpring.pct}% of normal rain, the following summers ${enSummer.pct}%, and the winter after ${enWinterAfter.pct}%.`;
+    if (it.key === 'iod') { const s = after(D.IP, spring, 0); ours = `Here, positive-IOD springs have brought a median ${s.pct}% of normal rain.`; }
+    if (it.key === 'thisyear') { const sp = seasonStats(lastFourSeasons()[3]); ours = `This ${lastFourSeasons()[3].s.name.toLowerCase()}: ${sp.pctOfNormal}% of normal so far.`; }
+    return `<li><b>${esc(it.name)}</b> <span class="tag ${it.tone || ''}">${esc(it.status)}</span><br>${esc(it.what)}${ours ? ` <span class="muted">${ours}</span>` : ''}</li>`;
+  }).join('');
+  return card({
+    q: 'What are the big weather systems doing?', headline: esc(now.headline),
+    chart: `<ul class="insights">${list}</ul>`,
+    explain: `<span class="tiny muted">From the Bureau of Meteorology's climate driver update and long-range forecast, ${fmtDate(now.asOf)}. Our numbers are from the Norton Summit rain record since 1900.</span>`
+  });
+}
 
-  el.innerHTML = `
-    <div class="card">
-      <div class="q">Look up any year</div>
-      <select id="ex-year" class="select">${yrs.map(yy => `<option value="${yy}" ${yy === y ? 'selected' : ''}>${yy}${yy === D.endYear ? ' (so far)' : ''}</option>`).join('')}</select>
-      <h3 class="answer" style="margin-top:12px">${isPartial ? `${y} so far: ${mm(total)}` : `${y} was ${word}: ${mm(total)}`}</h3>
-      <p class="explain">${isPartial ? '' : `${ordinal(rank)} wettest of ${full.length} years. `}${drivers.length ? `It was ${drivers.join(' and ')} year.`.replace(/^It was (E|I)/, 'It was an $1') : 'Neither El Niño nor La Niña.'}</p>
-      <div class="chart-wrap"><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Monthly rain in ${y} against the typical range">${g}</svg></div>
-      <div class="legend"><span><i style="background:var(--water)"></i>${y}</span><span><i class="line" style="background:var(--ink)"></i>Typical month</span></div>
-      <details><summary>See ${y} month by month</summary>${table(['Month', 'mm', 'Typical', 'vs typical'], D.monthly[y].slice(0, lastM + 1).map((v, m) => [MON[m], nf.format(v), nf.format(medM[m]), medM[m] ? pctTxt((v / medM[m] - 1) * 100) : '–']))}</details>
-    </div>
-    <div class="card">
-      <div class="q">Records since 1889</div>
-      <div class="rec-grid">
-        <div><h4>Wettest years</h4>${table(['', 'mm'], recRows(top(yearsArr, 5, true)))}</div>
-        <div><h4>Driest years</h4>${table(['', 'mm'], recRows(top(yearsArr, 5, false)))}</div>
-        <div><h4>Wettest months</h4>${table(['', 'mm'], recRows(top(monthsArr, 5, true)))}</div>
-        <div><h4>Wettest days</h4>${table(['', 'mm'], recRows(top(daysArr, 5, true)))}</div>
-      </div>
-    </div>
-    <div class="card">
-      <div class="q">Take the data with you</div>
-      <p class="explain">Every year and month since 1889 as a spreadsheet-ready file, with El Niño, La Niña and IOD flags.</p>
-      <button class="btn" id="ex-dl">Download yearly and monthly rain (CSV)</button>
-    </div>`;
-  $('#ex-year').onchange = e => { exploreState.year = +e.target.value; renderExplore(el); };
-  $('#ex-dl').onclick = () => {
-    const lines = ['year,' + MON.join(',') + ',total,enso,iod'];
-    D.years.forEach(yy => lines.push([yy, ...D.monthly[yy].map(v => v.toFixed(1)), sum(D.monthly[yy]).toFixed(1), D.EN.has(yy) ? 'El Nino' : D.LN.has(yy) ? 'La Nina' : '', D.IP.has(yy) ? 'positive' : D.IN.has(yy) ? 'negative' : ''].join(',')));
-    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' })); a.download = 'norton-summit-rain-1889-' + D.endYear + '.csv'; a.click();
-  };
-  el.querySelectorAll('svg.chart').forEach(bindTips);
+function renderRain() {
+  const el = $('#view-rain');
+  el.innerHTML = `<div class="view-head"><h1>Rain</h1><span class="sub">Norton Summit since 1889</span></div>
+    ${seasonsCard()}${outlookCard()}${forecastCard()}${driversNowCard()}
+    <p class="note">Rain for the Norton Summit area: the average of two 5 km SILO grid cells, 1889 to ${doyToDate(D.endDoy, D.endYear)} ${D.endYear}, counted on the 9 am rain day.</p>`;
+  el.querySelectorAll('.sq[data-tip]').forEach(t => t.onclick = e => showTip(t.dataset.tip, e.clientX, e.clientY));
+  if (!FC.data || Date.now() - FC.at > 30 * 60000) loadForecast().then(() => { const c = $('#fc-card'); if (c) c.outerHTML = forecastCard(); });
 }
 
 // ================================================================= TANKS: what's ahead (replaces the Outlook tab)
@@ -1103,19 +1062,6 @@ function toast(msg) {
   t.textContent = msg; t.style.opacity = 1; clearTimeout(t._h); t._h = setTimeout(() => t.style.opacity = 0, 2800);
 }
 
-// ================================================================= RAIN view shell
-const rainState = { sub: 'year' };
-function renderRain() {
-  const el = $('#view-rain');
-  el.innerHTML = `
-    <div class="view-head"><h1>Rain</h1><span class="sub">Norton Summit since 1889</span></div>
-    <div class="seg" role="tablist">${[['year', 'This year'], ['history', 'Patterns'], ['explore', 'Explore']].map(([k, l]) => `<button role="tab" data-sub="${k}" aria-selected="${rainState.sub === k}">${l}</button>`).join('')}</div>
-    <div id="rain-body"></div>`;
-  el.querySelectorAll('[data-sub]').forEach(b => b.onclick = () => { rainState.sub = b.dataset.sub; renderRain(); scrollTo(0, 0); });
-  const body = $('#rain-body');
-  ({ year: renderThisYear, history: renderHistory, explore: renderExplore })[rainState.sub](body);
-}
-
 // ================================================================= tabs + boot
 const rendered = {};
 function show(tab) {
@@ -1134,7 +1080,8 @@ document.querySelectorAll('.tabbar [data-tab]').forEach(b => b.onclick = () => s
   if (params.get('k')) setKey(params.get('k')); else if (keyOf()) setKey(keyOf());
   const initial = (location.hash || '').slice(1) || (() => { try { return localStorage.getItem('tal-tab'); } catch (e) { return null; } })() || (keyOf() ? 'tanks' : 'rain');
   document.querySelectorAll('.view').forEach(v => v.innerHTML = '<div class="skeleton">Loading 137 years of rain…</div>');
-  const raw = await fetch('data/rain.json', { cache: 'no-cache' }).then(r => r.json());
+  const [raw, drv] = await Promise.all([fetch('data/rain.json', { cache: 'no-cache' }).then(r => r.json()), fetch('data/drivers.json', { cache: 'no-cache' }).then(r => r.json()).catch(() => null)]);
+  DRV = drv;
   D = deriveData(raw);
   loadCachedTanks();
   document.addEventListener('visibilitychange', () => { if (!document.hidden && keyOf()) refreshTanks(true); });

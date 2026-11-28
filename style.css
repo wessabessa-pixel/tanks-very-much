@@ -188,3 +188,23 @@ details.more summary { color: var(--water); font-weight: 600; font-size: 14px; }
 .linkbtn { background: none; border: 0; padding: 0; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; }
 .warn-txt { color: var(--warn); }
 select.inp { appearance: auto; }
+
+/* ---- Rain: four season squares */
+.sq-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.sq { background: var(--bg); border-radius: 14px; padding: 11px 11px 10px; display: flex; flex-direction: column; gap: 3px; min-height: 150px; cursor: default; }
+.sq.dry { background: rgba(244,114,48,.13); } .sq.dry2 { background: rgba(244,114,48,.26); }
+.sq.wet { background: rgba(37,125,224,.12); } .sq.wet2 { background: rgba(37,125,224,.24); }
+.sq-top { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+.sq-top b { font-size: 15px; } .sq-top span { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.sq-num { font-size: 27px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.1; margin-top: 2px; }
+.sq-num small { font-size: 13px; font-weight: 600; color: var(--ink-2); letter-spacing: 0; }
+.sq-word { font-size: 14px; font-weight: 650; } .sq-word span { font-weight: 500; color: var(--ink-2); font-size: 12.5px; margin-left: 3px; }
+.sq-foot { font-size: 12px; color: var(--ink-2); line-height: 1.35; margin-top: auto; padding-top: 4px; }
+.sq-foot .bom { color: var(--ink); }
+.posbar { position: relative; height: 6px; border-radius: 99px; margin: 7px 2px 0;
+  background: linear-gradient(90deg, rgba(244,114,48,.55), rgba(160,160,160,.35) 50%, rgba(37,125,224,.55)); }
+.posbar::after { content: ""; position: absolute; left: 50%; top: -2px; width: 1px; height: 10px; background: var(--ink-3); }
+.posbar i { position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--ink); border: 2px solid var(--card); box-sizing: border-box; z-index: 1; }
+.posends { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-3); margin: 2px 0 0; }
+.fc-row .fc-c, .fc-row .fc-t { display: block; font-size: 10.5px; color: var(--ink-3); margin-top: 1px; }
+.insights .tag { margin: 0 0 0 4px; vertical-align: 1px; }
