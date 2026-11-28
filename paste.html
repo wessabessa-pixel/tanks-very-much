@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>Clipboard helper</title>
+<style>body{font:14px system-ui;margin:12px}textarea{width:100%;height:70vh;font:12px monospace}button{font-size:16px;padding:8px 16px;margin-top:8px}</style></head>
+<body><textarea id="t" spellcheck="false" placeholder="Paste or type text here"></textarea>
+<button id="c">Copy</button> <span id="s"></span>
+<script>
+document.getElementById('c').onclick=function(){var t=document.getElementById('t');t.focus();t.select();var ok=document.execCommand('copy');
+var v=t.value,h=0;for(var i=0;i<v.length;i++)h=(h*31+v.charCodeAt(i))>>>0;
+document.getElementById('s').textContent=(ok?'Copied ':'Copy failed ')+v.length+' chars, '+v.split('\n').length+' lines, hash '+h;};
+</script></body></html>
